@@ -1,0 +1,741 @@
+---
+title: "Bangladesh flood"
+output: html_document
+date: "2023-04-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Attach packages ##
+
+```{r packages}
+#library("plyr")                     # Load plyr package
+library("dplyr")
+library("readr")                    # Load readr package
+library("ncdf4")                    # package for netcdf manipulation
+library("raster")                   # package for raster manipulation
+library("rgdal")                    # package for geospatial analysis
+library("ggplot2")                  # package for plotting
+library("haven")                    # Load dta files
+library("dplyr")                    # Load dplyr package
+library("foreign")                  # Export dta files
+library("geosphere")                # Find the geographical distance 
+library("rworldmap")                # Mapping country boundaries                  
+library("leaflet")                  # Interactive maps
+library("htmlwidgets")              # HTML widgets
+library("RColorBrewer")             # Nice colours
+library("hrbrthemes")               # Nice plots
+library("scales")                   # Scales for graphs
+library("ggthemes")                 # Themes for ggplot
+library("data.table")
+library("sf")
+library("stringr")
+
+```
+
+##  Import multiple flood events ##
+
+All flood events from Bangladesh between 2010-2018 from the Global Flood Database at https://global-flood-database.cloudtostreet.ai/ 
+
+Load all the TIF files and layer them as a brick. Extract information using string operators to identify the full date of the flood event. 
+
+```{r pressure, echo=FALSE}
+# Set the working directory to TIF files
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Global Flood Database")
+
+# Create a list of TIF files usinf the DFO pattern and save as data frames
+DFO_files <- list.files(pattern = "*DFO",
+                           full.names = TRUE) %>%
+  lapply(brick)
+
+# Convert the bricks into data frames, extract the flooded layer and find an identifier for the year of the flood --> to be saved in the data frame somehow (ideally as variable names)
+
+# check names in the first brick from the list of DFO files
+DFO_files[[1]]@file@name
+
+# Try and extract the year of the flood from the name of the file 
+year <- substr(DFO_files[[1]]@file@name, 109, 112)
+
+year
+
+month <- substr(DFO_files[[1]]@file@name, 113, 114)
+month
+
+day <- substr(DFO_files[[1]]@file@name, 115, 116)
+day
+
+fulldate <- substr(DFO_files[[1]]@file@name, 109, 116)
+fulldate
+
+# Clear all
+#rm(list = ls())
+```
+
+
+##  Load shapefile for Bangladesh ##
+
+Subnational boundaries at adminsitrative level 4 (unions) coming from https://data.humdata.org/dataset/cod-ab-bgd
+
+```{r}
+# Set working directory 
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Administrative boundary shapefiles/bgd_adm_bbs_20201113_shp/bgd_adm_bbs_20201113_SHP")
+
+# The below version will import the shapefile in a "Spatial Polygons Data Frame" format, which is easier for spatial joins
+bgd_test <- readOGR("bgd_admbnda_adm4_bbs_20201113.shp")
+
+# Use the sf package as it gives the geometry
+bgd_test2 <- st_read("bgd_admbnda_adm4_bbs_20201113.shp")
+```
+
+# Find centroids of the polygon describing each union # 
+
+```{r}
+# Find the centroid of each polygon
+bgd_test2 <- bgd_test2 %>% mutate(centroids = st_centroid(st_geometry(.)))
+
+# Extract longitude and latitude of that centroid
+bgd_test2 <- bgd_test2 %>% mutate(long=gsub(".*POINT (.+) ''.*", "\\1", centroids),
+         cords=str_split_fixed(long,', ',2),
+         longitude=as.numeric(gsub('c\\(','',cords[,1])),
+         latitude=as.numeric(gsub('\\)','',cords[,2])))
+
+# Turn into a data frame
+bgd_test2 <- as.data.frame(bgd_test2)
+
+```
+
+
+Create data frames from the list of TIF files
+
+This loop will turn TIFF files from DFO into data frames then perform a spatial join with the shapefile and keep only the points that fall within the Bangladesh boundaries, with each flood event assigned to a union (admin 4) and combined into one big data frame
+
+
+The result will be aggregated at the union level, i.e. using the shapefile for Bangladesh, for every one of the 5160 unions, this loop will assign either a 0 or a 1 depending on whether a flood occurred within the boundaries of the union in a particular year. The output will be a data frame with variables named accortding to the flood date (year-month-day) and a binary indicator showing whether a union was flooded.
+
+Something like: 
+1. Turn TIFF files into data frames
+2. Perform a spatial join with the shapefile to identify only points that fall within Bangladesh
+3. Replace NA values with 0 (means no flood)
+4. Aggregate the data at the level of the union - if there was at least one flood event that fell within the union, assign 1. Otherwise, assign 0.
+5. Left join with the data frame that has shapefile information 
+
+
+```{r Create data frames}
+# Create a vector with the length of the list
+num_TIF_files <- 1:39
+
+# Create a list of data frames
+#flood_df <- list()
+
+# Create a data frame version of the shapefile
+flood_bgd <- as.data.frame(bgd_test)
+
+# Version 2 that does not create all these data frames but just one that gets replaced
+
+
+for (i in num_TIF_files) {
+  fulldate <- substr(DFO_files[[i]]@file@name, 109, 116)              # Extract the full date of the flood event
+  test_data <- as.data.frame(DFO_files[[i]]$flooded, xy=TRUE)         # Turn TIF files into data frames
+  coordinates(test_data) <- ~x+y                                      # Turn data frame into spatial points data frame
+  proj4string(test_data) <- CRS("+proj=longlat +datum=WGS84 +no_defs")   # Change CRS to match shapefile
+  proj4string(bgd_test) <- CRS("+proj=longlat +datum=WGS84 +no_defs") 
+  ID <- over(test_data, bgd_test)                               # Perform a spatial join with the Bangladesh shapefile
+  test_data@data <- cbind( test_data@data , ID )                # Merge back with the data frame
+  test_data <- as.data.frame(test_data)                         # Turn into data frame
+  test_data <- subset(test_data, select = -c(x, y))              #Remove exact coordinates
+  test_data <- test_data %>% mutate(flooded = ifelse(is.na(flooded), 0, flooded))  # Replace NA values with 0s (means no flood)
+  flood_bgd <- left_join(flood_bgd, test_data)                           # Left join with data frame that has points within Bangladesh
+  flood_bgd <- flood_bgd %>%                                   # Within each admin level 4 (union), sum up the number of cells that were flooded
+  group_by(ADM4_PCODE) %>% 
+  mutate(sum_num = sum(flooded))            
+  flood_bgd <- subset(flood_bgd, select = -flooded)           # remove the original flood variable
+  flood_bgd$flooded <- 0                              # add a new one which will be a binary indicator for whether a union was flooded or not (aggregated)
+  flood_bgd$flooded[flood_bgd$sum_num > 0] <- 1       # if there is at least one cell that was flooded and falls within the union, mark as flooded
+  flood_bgd <- subset(flood_bgd, select = -sum_num)   # remove the summary column
+  flood_bgd <- flood_bgd[!duplicated(flood_bgd$ADM4_PCODE), ]      # remove duplicates (now we are only interested in the aggregated union 4 level)
+  names(flood_bgd)[names(flood_bgd) == 'flooded'] <- fulldate   # Rename the column according to flood date 
+  
+}
+
+
+
+```
+
+Note: this is where the R data file ends
+
+# Import BIHS data for matching by the union code  #
+
+```{r import BIHS}
+# Set directory
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/BIHS data")
+
+# Import data file with administrative codes in Bangladesh
+BIHS_admin <- read_dta("BIHSlocations.dta")
+
+```
+
+# Rename the union variable to match the codes in BIHS ##
+
+The Bangladesh shapefile has a slightly different naming convention for administrative level 4 (union)
+
+
+```{r}
+# Create a new data frame with compatible codes
+# Remove unnecessary columns
+
+flood_bgd <- flood_bgd[ , !names(flood_bgd) %in% 
+    c("ADM4_REF","ADM4ALT1EN", "ADM4ALT2EN")]
+
+# Rename the code identifiers for administrative levels - remove BD
+flood_bgd$ADM4_PCODE <- substr(flood_bgd$ADM4_PCODE, 3, 10)
+
+# Check that codes for admin 1 (division) follow the same conventions
+unique(flood_bgd$ADM1_PCODE)
+unique(BIHS_admin$dvcode)
+
+# Yep, all good 
+
+# Remove the first 2 digits from the union code (those refer to admin level 1)
+flood_bgd$ADM4_PCODE <- substr(flood_bgd$ADM4_PCODE, 3, 10)
+
+# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
+
+# Change to numeric - this will drop 0 at the front 
+flood_bgd$ADM4_PCODE <- as.numeric(flood_bgd$ADM4_PCODE)
+
+# Back to character 
+flood_bgd$ADM4_PCODE <- as.character(flood_bgd$ADM4_PCODE)
+
+# Rename columns in BIHS_admin before the join 
+names(BIHS_admin)[names(BIHS_admin) == "uncode"] <- "ADM4_PCODE"
+
+# Back to character for compatibility of the merge
+flood_bgd$ADM4_PCODE <- as.character(flood_bgd$ADM4_PCODE)
+BIHS_admin$ADM4_PCODE <- as.character(BIHS_admin$ADM4_PCODE)
+
+
+
+```
+
+# Make union identifiers consistent with BIHS for data frame with union centroids #
+
+```{r}
+# Rename the code identifiers for administrative levels - remove BD
+bgd_test2$ADM4_PCODE <- substr(bgd_test2$ADM4_PCODE, 3, 10)
+
+# Remove the first 2 digits from the union code (those refer to admin level 1)
+bgd_test2$ADM4_PCODE <- substr(bgd_test2$ADM4_PCODE, 3, 10)
+
+# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
+
+# Change to numeric - this will drop 0 at the front 
+bgd_test2$ADM4_PCODE <- as.numeric(bgd_test2$ADM4_PCODE)
+
+# Back to character 
+bgd_test2$ADM4_PCODE <- as.character(bgd_test2$ADM4_PCODE)
+
+# Rename columns in BIHS_admin before the join 
+names(bgd_test2)[names(bgd_test2) == "ADM4_PCODE"] <- "uncode"
+
+# Manually replace codes for consistency with BIHS
+bgd_test2$uncode[bgd_test2$uncode=="199417"] <- "193617"  #1
+bgd_test2$uncode[bgd_test2$uncode=="198110"] <- "198104"  #2
+bgd_test2$uncode[bgd_test2$uncode=="338621"] <- "338609"  #3
+bgd_test2$uncode[bgd_test2$uncode=="354311"] <- "354306"  #4
+bgd_test2$uncode[bgd_test2$uncode=="824795"] <- "827395"  #5 
+bgd_test2$uncode[bgd_test2$uncode=="932580"] <- "935780"  #6
+bgd_test2$uncode[bgd_test2$uncode=="108556"] <- "102056"  #7
+bgd_test2$uncode[bgd_test2$uncode=="105413"] <- "105409"  #8
+bgd_test2$uncode[bgd_test2$uncode=="386115"] <- "386109"  #9
+bgd_test2$uncode[bgd_test2$uncode=="696320"] <- "696312"  #10
+bgd_test2$uncode[bgd_test2$uncode=="496111"] <- "496106"  #11
+bgd_test2$uncode[bgd_test2$uncode=="855826"] <- "855816"  #12
+bgd_test2$uncode[bgd_test2$uncode=="857317"] <- "857309"  #13
+bgd_test2$uncode[bgd_test2$uncode=="857656"] <- "857650"  #14
+
+# Keep only necessary columns
+bgd_test2 <- bgd_test2[, c("uncode", "longitude", "latitude")]
+
+# Export as csv
+write.csv(bgd_test2, "BIHS_lonlat.csv")
+
+```
+
+
+## Inspect the union codes that did not match manually, then join dataframes ##
+
+For all 14 cases, look at the Stata dta file with BIHS locations that also has labels with names in English. On that basis, find the corresponding ADM4_PCODE in the shapefile, which is different.
+
+1. BIHS code: 193617, BIHS name: Bitikandi, Shapefile ADM4_PCODE: 199417
+2. BIHS code: 198104, BIHS name: Akubpur, Shapefile ADM4_PCODE: 198110
+3. BIHS code: 338609, BIHS name: Barmi, Shapefile ADM4_PCODE: 338621
+4. BIHS code: 354306, BIHS name: Bethuri, Shapefile ADM4_PCODE: 354311
+5. BIHS code: 827395, BIHS name: Saorail, Shapefile ADM4_PCODE: 824795
+6. BIHS code: 935780, BIHS name: Musuddi, Shapefile ADM4_PCODE: 932580
+7. BIHS code: 102056, BIHS name: Majhira , Shapefile ADM4_PCODE: 108556
+8. BIHS code: 105409, BIHS name: Bir Kedar, Shapefile ADM4_PCODE: 105413
+9. BIHS code: 386109, BIHS name: Alampur, Shapefile ADM4_PCODE: 386115
+10. BIHS code: 696312, BIHS name: Bara Harishpur, Shapefile ADM4_PCODE: 696320
+11. BIHS code: 496106, BIHS name: Ballabher Khas, Shapefile ADM4_PCODE: 496111
+12. BIHS code: 855816, BIHS name: Bara Hazratpur, Shapefile ADM4_PCODE: 855826
+13. BIHS code: 857309, BIHS name: Annadanagar, Shapefile ADM4_PCODE: 857317
+14. BIHS code: 857650, BIHS name:  Madankhali, Shapefile ADM4_PCODE: 857656
+
+```{r uncodes}
+# Create another data frame with values from the Bangladesh shapefile to replace with new matching codes. Here I replace shapefile codes with codes from BIHS.
+flood_bgd_newcodes <- flood_bgd
+
+# Now replace admin 4 codes
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="199417"] <- "193617"  #1
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="198110"] <- "198104"  #2
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="338621"] <- "338609"  #3
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="354311"] <- "354306"  #4
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="824795"] <- "827395"  #5 
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="932580"] <- "935780"  #6
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="108556"] <- "102056"  #7
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="105413"] <- "105409"  #8
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="386115"] <- "386109"  #9
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="696320"] <- "696312"  #10
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="496111"] <- "496106"  #11
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="855826"] <- "855816"  #12
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="857317"] <- "857309"  #13
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="857656"] <- "857650"  #14
+
+# Left join - jsut to see how many observations oberlap.
+BIHS_flood <- left_join(BIHS_admin, flood_bgd_newcodes)
+
+# Remove ugly columns
+BIHS_flood <- BIHS_flood[ , !names(BIHS_flood) %in% 
+    c("date","validTo", "validOn")]
+
+# Export BIHS data matched with flood data a csv file where the "ADM4_PCODE" column corresponds to the "uncode" column from the BIHS data. 
+write.csv(BIHS_flood, "BIHS_flood.csv")
+
+# Check for missing values - no NAs :)
+summary(BIHS_flood)
+```
+
+# Comvine flood and drought data into one data frame #
+
+```{r BIHS drought and flood}
+# Import the BIHS drought file
+# Set working directory
+setwd("C:/Users/idabr/Dropbox (OPML)/DEEP Conflict and Climate Bangladesh/Code")
+
+# Import the ACLED data 
+BIHS_drought <- read.csv("BIHS_drought.csv")
+
+# Turn admin codes into characters 
+BIHS_drought$ADM4_PCODE <- as.character(BIHS_drought$ADM4_PCODE)
+
+# Combine into a single file
+BIHS_climate <- left_join(BIHS_flood, BIHS_drought)
+
+# Check for missing values - no NAs :)
+summary(BIHS_climate)
+
+# Remove the "X" column 
+BIHS_climate <- BIHS_climate[ , !names(BIHS_climate) %in% 
+    c("X")]
+
+# Export final climate dataset
+write.csv(BIHS_climate, "BIHS_climate.csv")
+
+# Save workspace 
+save.image("C:/Users/idabr/Dropbox (OPML)/DEEP Conflict and Climate Bangladesh/Code/Flood workspace.RData")
+```
+
+## Visualise floods ##
+
+Turn layers of each flood event in Banlgadesh between 2010-2018 into a mosaic
+
+```{r flood vis}
+# Start with a test plot of one flood from the DFO files list
+plot(DFO_files[[1]]$flooded)
+
+# Make a new list of floods 
+flood_list <- DFO_files
+
+# Extract only the layer we are interested in (flooded) - for all these files. Replace all elements in the list 
+for (i in 1:39) {
+ flood_list[[i]] <- subset(flood_list[[i]], "flooded")
+  
+}
+
+# Turn into a mosaic 
+for (i in 2:39) {
+
+megaraster <- mosaic(flood_list[[1]], flood_list[[i]], fun="max")
+
+}
+
+plot(megaraster, axes=F, legend=F, box=F)
+
+# This also seems to align with the flood database
+
+# Reclassify 0s to missing values so they are not displayed on the map
+y <- reclassify(megaraster, cbind(-Inf, 0, NA))
+
+summary(y)
+
+plot(y, axes=F, box=F, legend=F)
+
+# Create an interactive map
+# Set colour palette 
+pal <- colorNumeric(c("#FFFFCC", "#0C2C84" ,"#41B6C4"), values(y),
+  na.color = "transparent")
+
+map2 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(y, colors = pal) %>%
+  addLegend(pal = pal, values = values(y),
+    title = "Floods")
+
+map2
+
+# Save map as widget
+saveWidget(map2, file="BGD_floods.html")
+```
+
+## Add droughts to the visualisation ##
+
+I will need to use all grid cells that fall within Bangladesh
+
+```{r vis drought}
+# Import the data frame with SPEI values
+setwd("C:/Users/idabr/Dropbox (OPML)/DEEP Conflict and Climate Bangladesh/Code")
+
+# Make a data frame with just geographical coordinates, regular 0.5 degrees grid and SPEI values 
+drought_201020 <- read.csv("SPEI_2010_20_BGD.csv")
+
+# Add a column that has the lowest value of SPEI between 2010-2020
+drought_201020$minSPEI <- apply(drought_201020[,4:14],1,min)
+
+# Replace all values above -1.5 with NA (we are only interested in drought defined as SPEI<-1.5)
+drought_201020$minSPEI[drought_201020$minSPEI > -1.5] <- NA
+
+# Let's also have a version for SPEI<0
+drought_201020$minSPEIzero <- apply(drought_201020[,4:14],1,min)
+
+# Replace all values above 0 with NA (we are only interested in drought defined as SPEI<0)
+drought_201020$minSPEIzero[drought_201020$minSPEI > 0] <- NA
+
+# Create a data frame with just the variable of interest and grid coordinates 
+
+ex_drought <- drought_201020[, c("lon", "lat", "minSPEI")]
+spei_zero_drought <- drought_201020[, c("lon", "lat", "minSPEIzero")]
+
+# Remove missing values
+ex_drought <- ex_drought[complete.cases(ex_drought), ]
+spei_zero_drought <- spei_zero_drought[complete.cases(spei_zero_drought), ]
+
+# Create raster
+r_drought <- rasterFromXYZ(ex_drought)
+r_drought_zero <- rasterFromXYZ(spei_zero_drought)
+
+# Simple plot to see how the raster came out
+
+plot(r_drought, axes=F, box=F)
+
+# Tag a coordinate system
+crs(r_drought) <- sp::CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+crs(r_drought_zero)  <- sp::CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+
+# Check colour palettes - want something red
+display.brewer.pal(n = 8, name = 'YlOrRd')
+
+# Hexadecimal color specification 
+brewer.pal(n = 8, name = "YlOrRd")
+
+# Set colour palette 
+pal1 <- colorNumeric(c("#B10026", "#E31A1C", "#FFFFCC", "#FC4E2A", "#FD8D3C", "#FEB24C", "#FED976", "#FFEDA0"), values(r_drought),
+  na.color = "transparent")
+
+pal2 <- colorNumeric(c("#E31A1C", "#FFFFCC", "#FC4E2A", "#FD8D3C", "#FEB24C", "#FED976", "#FFEDA0"), values(r_drought_zero),
+  na.color = "transparent")
+
+
+# Now put it onto leaflet 
+map3 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(r_drought,  colors = pal1, project=FALSE)%>%
+   addLegend(pal = pal1, values = values(r_drought), title = "SPEI")
+
+map3
+
+# Save map as widget
+#saveWidget(map3, file="Nigeria_drought_map.html")
+
+```
+
+## Combine visualisations of flood and drought in Bangladesh ##
+
+Nice, but let's try and only visualise grid cells that belong to Bangladesh
+
+```{r}
+map5 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(r_drought,  colors = pal2, opacity=0.7, project = FALSE)%>%
+  addLegend(pal = pal2, values = values(r_drought), title = "SPEI") %>%
+  addRasterImage(y, colors = pal) 
+
+map5
+
+# Save map as widget
+saveWidget(map5, file="BGD_climate_map.html")
+```
+
+# Restrict grid cells to only Bangladesh #
+
+Try using a spatial join but keep in mind that this might not capture cells at the border. An annoying way to do this would be to resample SPEI to a higher spatial resolution, perform the spatial join, and keep only cells that fall within Bangladesh. Then remove the duplicated resampled cells and keep only 0.5 degree resolution
+
+```{r}
+
+# Disaggregate - this will create a "higher resolution" grid, even though the values of the points falling within the larger grid cell will be the same, this wil allow for the spatial join with a shapefile so that each union has its distinct SPEI data point. You can play around with the factor of disaggregation.
+raster_spei_disag <-  disaggregate(r_drought, fact=200)
+
+# Turn back into a data frame - now we have more data points
+spei_df <- as.data.frame(raster_spei_disag, xy=TRUE)
+
+# Remove NA values
+spei_df <- na.omit(spei_df)
+
+# Turn into a spatial data frame for a spatial join with the shapefile 
+spei_df$x <- as.numeric(spei_df$x)
+spei_df$y <- as.numeric(spei_df$y)
+coordinates(spei_df) <- ~x+y
+
+# Set CRS as the same - taken from shapefile
+proj4string(spei_df) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+
+# Make a test shapefile
+test_data <- bgd_test
+
+# Perform a spatial join with the Bangladesh shapefile
+ID <- over(spei_df, test_data)                               
+spei_df@data <- cbind(spei_df@data , ID )  
+
+# Turn back into a data frame  
+spei_df <- as.data.frame(spei_df)
+
+# Remove NA values - those fall outside of Bangladesh
+spei_df <- spei_df[!is.na(spei_df$ADM4_EN),]
+
+# Keep only x,y, and minSPEI
+spei_df2 <- spei_df[, c("x", "y", "minSPEI")]
+
+# Turn into a raster
+spei_df2_raster <- rasterFromXYZ(spei_df2)
+
+# Turn back into the original spatial resolution - aggregate by a factor of 200
+spei_df2_raster <-  aggregate(spei_df2_raster, fact=200)
+
+```
+
+## Visualisation ##
+
+```{r vis climate BGD}
+# Create a colour pallete for drought values
+pal3 <- colorNumeric(c("#E31A1C", "#FFFFCC", "#FC4E2A", "#FD8D3C", "#FEB24C", "#FED976", "#FFEDA0"), values(spei_df2_raster),
+  na.color = "transparent")
+
+# Make sure raster image with drought has the same CRS as floods
+crs_flood <- crs(y)
+crs(spei_df2_raster) <- crs_flood
+
+# Create a map
+
+map6 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(spei_df2_raster,  colors = pal3, opacity=0.7, project = FALSE)%>%
+  addLegend(pal = pal3, values = values(spei_df2_raster), title = "SPEI") %>%
+  addRasterImage(y, colors = pal) 
+
+map6
+
+# Save map as widget
+saveWidget(map6, file="BGD_climate_map.html")
+```
+
+# Make graphs with trends in droughts and floods over time #
+
+For floods, we can simply count the number of flood events occuring each year. For drought, I will show the number of districts (there are 64 districts in Bangladesh in total) affected by drought each year. District is administrative level 2
+
+New approach (Vidya's idea): for each year and each state, find the minimum value of SPEI and assign it to one of the 4 categories below so that we get non-overlapping categories in the stacked area graph.
+
+These are the 4 categories of drought:
+1.  'SPEI < -1.5'
+2. '-1.5 < SPEI < -1'
+3.  '-1 < SPEI < -0.5'
+4. "-0.5 < SPEI < 0"
+
+```{r}
+# First turn into raster and disaggregate
+
+# Remove first column 
+drought_201020 <- drought_201020[,2:16]
+
+# Turn into raster
+raster_SPEI_201020 <- rasterFromXYZ(drought_201020)
+
+# Make sure the CRS is consistent with shapefile
+proj4string(raster_SPEI_201020) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+
+# Disaggregate - this will create a "higher resolution" grid, even though the values of the points falling within the larger grid cell will be the same, this wil allow for the spatial join with a shapefile so that each union has its distinct SPEI data point. You can play around with the factor of disaggregation.
+raster_SPEI_201020_dis <-  disaggregate(raster_SPEI_201020, fact=200)
+
+# Turn back into a data frame - now we have more data points
+SPEI_201020_dis_df <- as.data.frame(raster_SPEI_201020_dis, xy=TRUE)
+
+
+# Make a spatial data frame for drought
+coordinates(SPEI_201020_dis_df) <- ~x+y
+
+# Make sure they have the same CRS
+crs_BGD <- crs(bgd_test)
+crs(SPEI_201020_dis_df) <- crs_BGD
+
+# Assign values from the BGD shapefile to the SPEI data frame
+ID <- over(SPEI_201020_dis_df, bgd_test)                               
+SPEI_201020_dis_df@data <- cbind(SPEI_201020_dis_df@data , ID )
+SPEI_201020_dis_df <- as.data.frame(SPEI_201020_dis_df)
+
+# Remove NA values - those fall outside of Bangladesh
+SPEI_201020_dis_df <- SPEI_201020_dis_df[!is.na(SPEI_201020_dis_df$ADM4_EN),]
+
+# Remove unnecessary columns
+SPEI_201020_dis_df <- SPEI_201020_dis_df[ , !names(SPEI_201020_dis_df) %in% 
+    c("ADM4_REF","ADM4ALT1EN", "ADM4ALT2EN", "validTo", "validOn", "date", "minSPEI", "minSPEIzero", "Shape_Leng", "Shape_Area", "ADM0_PCODE", "ADM0_EN")]
+
+# Assign nicer row names 
+rownames(SPEI_201020_dis_df) <- 1:nrow(SPEI_201020_dis_df)
+
+# Reshape lond
+long.drought <- melt(setDT(SPEI_201020_dis_df), id.vars = c("x","y", "ADM4_PCODE", "ADM4_EN", "ADM3_PCODE", "ADM3_EN", "ADM2_PCODE", "ADM2_EN", "ADM1_PCODE", "ADM1_EN"), variable.name = "year")
+
+# Remove "SPEI" from the year values
+long.drought$year <- substr(long.drought$year, 6, 10)
+
+# Rename column to indicate SPEI values
+names(long.drought)[names(long.drought) == 'value'] <- "SPEI"
+
+# Leave only observations where SPEI values differ within unions
+long.drought <- long.drought[!duplicated(long.drought[ , c("ADM4_PCODE", "ADM4_EN", "ADM3_PCODE", "ADM3_EN", "ADM2_PCODE", "ADM2_EN", "ADM1_PCODE", "ADM1_EN", "year", "SPEI")]),]
+
+# Remove unnecessary large objects
+rm(SPEI_201020_dis_df, raster_SPEI_201020, raster_SPEI_201020_dis)
+
+# For each district and year, find the minimum value of SPEI and save in a data frame 
+results <- long.drought %>%
+  group_by(ADM2_EN, year) %>%
+  summarize(minSPEI = min(SPEI))
+
+# Create a variable assigning categories of drought
+results <- results %>% mutate(Drought =
+                     case_when(minSPEI < -1.5 ~ "1", 
+                               minSPEI < -1 & minSPEI > -1.5 ~ "2",
+                               minSPEI < -0.5 & minSPEI > -1 ~ "3",
+                               minSPEI< 0 & minSPEI > -0.5 ~ "4",
+                               )
+)
+
+# Remove NA values
+results<-subset(results, Drought!="NA")
+
+# Count the number of states in each category of drought each year  
+results2 <- results %>%
+  group_by(Drought, year) %>%
+  summarize(count = n_distinct(ADM2_EN))
+
+# Order by year and drought
+results2 <- results2[order(results2$year, results2$Drought),]
+
+# Expand a data frame to cover all categories of drought and all years 
+g <- with(results2, expand.grid(year = seq(min(year), max(year)), Drought = unique(Drought), count = 0)) #
+
+# Reorder the data frame
+g <- g[order(g$year, g$Drought),]
+
+# Change column name
+colnames(results2)[3] <- "number"
+
+# Turn years into numeric
+g$year <- as.numeric(g$year)
+results2$year <- as.numeric(results2$year)
+
+
+# Left join - need for the results data frame to override the other one 
+test <- left_join(g, results2)
+
+# Replace values of count with number if number is non-missing
+test$number <-replace(test$number, is.na(test$number), test$count)
+
+# Drop the count column 
+test = subset(test, select = -count )
+
+# Rename codes
+test$Drought[test$Drought == '1'] <- 'SPEI < -1.5'
+test$Drought[test$Drought == '2'] <- '-1.5 < SPEI < -1'
+test$Drought[test$Drought == '3'] <- '-1 < SPEI < -0.5'
+test$Drought[test$Drought == '4'] <- "-0.5 < SPEI < 0"
+
+# Give a specific order:
+test$Drought <- factor(test$Drought , levels=c('SPEI < -1.5', '-1.5 < SPEI < -1', '-1 < SPEI < -0.5', "-0.5 < SPEI < 0") )
+
+
+# Plot
+ggplot(test, aes(x=year, y=number, fill=Drought)) + 
+    geom_area()+ 
+scale_x_continuous(breaks= pretty_breaks())+ theme_minimal() + scale_fill_brewer(palette="Blues")+
+  xlab("Year") + ylab("Number of districts") + ggtitle("Number of districts affected by drought in Bangladesh in the period 2010-2020")
+
+# Check with values from the drought data frame
+summary(drought_201020)
+
+
+```
+Now let's create a graph for number of floods per year during 2010-2018
+
+```{r}
+# Save column names from the flood data frame - those already contain the dates of the flood events
+flood.dates <- colnames(flood_bgd[,16:54])
+
+# Leave only the year of the flood
+flood.dates <- substr(flood.dates, 1, 4)
+
+# Turn into a table
+flood.table <- table(flood.dates)
+flood.table
+
+# Turn into a data frame
+flood.ts <- as.data.frame(flood.table)
+
+# Drop levels
+flood.ts$flood.dates <- levels(droplevels(flood.ts$flood.dates))
+
+# Change to numeric
+flood.ts$flood.dates <- as.numeric(flood.ts$flood.dates)
+flood.ts$Freq <- as.numeric(flood.ts$Freq)
+
+# Plot
+ggplot(flood.ts, aes(x=flood.dates, y=Freq, fill="Blue", legend=F)) + 
+    geom_area()+ 
+scale_x_continuous(breaks= pretty_breaks())+ 
+scale_y_continuous(breaks= pretty_breaks()) + 
+  theme_minimal() + scale_fill_brewer(palette="Blues")+
+  xlab("Year") + ylab("Number of floods") + ggtitle("Number of floods in Bangladesh in the period 2010-2018")
+
+
+```
+
+
+
+# Save workspace image #
+
+```{r save workspace}
+# Save workspace 
+save.image("C:/Users/idabr/Dropbox (OPML)/DEEP Conflict and Climate Bangladesh/Code/Flood workspace v2.RData")
+```
+

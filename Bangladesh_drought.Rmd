@@ -1,0 +1,870 @@
+---
+title: "Floods Bangladesh"
+output: html_document
+date: '2022-09-20'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Attach packages
+
+```{r packages}
+library("plyr")                     # Load plyr package
+library("dplyr")
+library("readr")                    # Load readr package
+library("ncdf4")                    # package for netcdf manipulation
+library("raster")                   # package for raster manipulation
+library("rgdal")                    # package for geospatial analysis
+library("ggplot2")                  # package for plotting
+library("haven")                    # Load dta files
+library("dplyr")                    # Load dplyr package
+library("foreign")                  # Export dta files
+library("geosphere")                # Find the geographical distance 
+library("rworldmap")                # Mapping country boundaries                  
+library("leaflet")                  # Interactive maps
+library("htmlwidgets")              # HTML widgets
+library("RColorBrewer")             # Nice colours
+library("scales")                   # Scales for graphs
+library("sf")                       # working with shapefiles
+library("rgeos")
+library("SPEI")                     # SPEI construction
+library("vctrs")                    # Vector operations
+```
+
+
+## 1. MATCH ACLED DATA WITH A BGD SHAPEFILE AND BIHS ADMIN CODES ##
+
+## Load Data on administrative divisions in Bangladesh from BIHS ##
+
+Note: BIHS does not have GPS coordinates of households, but offers codes for the following administrative levels: division, district, upazila, and union (rural councils).
+
+I will try and match flood data to the lowest administrative level in rural Bangladesh (unions). I will assign a value of 1 to every union within which there was a flood. All households residing within this union will then be considered exposed to the flood.
+
+```{r bihs}
+# Set directory
+setwd("C:/Users/idabr/Dropbox (OPML)/DEEP Conflict and Climate Bangladesh/Data/BIHS data")
+
+# Import data file with administrative codes in Bangladesh
+BIHS_admin <- read_dta("BIHSlocations.dta")
+
+```
+
+##  Load shapefile for Bangladesh ##
+
+Subnational boundaries at adminsitrative level 4 (unions) coming from https://data.humdata.org/dataset/cod-ab-bgd
+
+```{r bgd shapefile admin 4}
+# Set working directory 
+setwd("C:/Users/idabr/Dropbox (OPML)/DEEP Conflict and Climate Bangladesh/Data/Administrative boundary shapefiles/bgd_adm_bbs_20201113_shp/bgd_adm_bbs_20201113_SHP")
+
+# Load the shapefile
+#bgd_admin4 <- st_read("bgd_admbnda_adm4_bbs_20201113.shp")
+
+# The below version will import the shapefile in a "Spatial Polygons Data Frame" format, which is easier for spatial joins
+bgd_test <- readOGR("bgd_admbnda_adm4_bbs_20201113.shp")
+
+```
+
+## Load ACLED data on conflict ##
+
+Import the excel spreadsheet that Vidya provided. Then match the geographical coordinates of each conflict event to the union from the Bangladesh shapefile 
+
+We have longitude and latitude
+
+```{r acled}
+# Set working directory
+setwd("C:/Users/idabr/Dropbox (OPML)/DEEP Conflict and Climate Bangladesh/Data/ACLED")
+
+# Import the ACLED data 
+acled_data <- read.csv("Bangladesh_ACLED.csv")
+
+# Turn ACLED data frame into spatial points data frame
+coordinates(acled_data) <- ~longitude+latitude
+
+# Set projection as the same for both data frames - based on the projection from the Bangladesh shapefile
+proj4string(acled_data) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+proj4string(bgd_test) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+
+# Perform a spatial join between a spatial points data frame with ACLED data and a spatial polygons data frame from the Bangladesh shapefile. This function will check whether each spatial point (geographical coordinates) falls inside each polygon and return a data frame with successfully matched information from both spatial objects.
+
+ID <- over(acled_data, bgd_test)
+acled_data@data <- cbind( acled_data@data , ID )
+
+# Turn the spatial points data frame into a regular data frame 
+acled_geo <- as.data.frame(acled_data)
+
+# Export as csv file 
+write.csv(acled_geo, "ACLED_geo.csv")
+```
+
+# Match geo-referenced data from ACLED with BIHS ##
+
+In the BIHS data, the admin 4 code has between 5-6 digits. Admin 4 code is a combination of codes for administrative levels 1, 2, 3 that need to be broken down to ensure compatibility. 
+
+The format that I will save admin 4 codes in will follow from BIHS: 5-6 digits.
+
+```{r}
+# Create a new data frame with compatible codes
+# Remove unnecessary columns
+
+acled_geo1 <- acled_geo[ , !names(acled_geo) %in% 
+    c("ADM4_REF","ADM4ALT1EN", "ADM4ALT2EN")]
+
+# Rename the code identifiers for administrative levels - remove BD
+acled_geo1$ADM4_PCODE <- substr(acled_geo1$ADM4_PCODE, 3, 10)
+acled_geo1$ADM3_PCODE <- substr(acled_geo1$ADM3_PCODE, 3, 10)
+acled_geo1$ADM2_PCODE <- substr(acled_geo1$ADM2_PCODE, 3, 10)
+acled_geo1$ADM1_PCODE <- substr(acled_geo1$ADM1_PCODE, 3, 10)
+
+# Check that codes for admin 1 (division) follow the same conventions
+unique(acled_geo1$ADM1_PCODE)
+unique(BIHS_admin$dvcode)
+
+# Yep, all good 
+
+# Remove the first 2 digits from the union code (those refer to admin level 1)
+acled_geo1$ADM4_PCODE <- substr(acled_geo1$ADM4_PCODE, 3, 10)
+
+# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
+
+# Change to numeric - this will drop 0 at the front 
+acled_geo1$ADM4_PCODE <- as.numeric(acled_geo1$ADM4_PCODE)
+
+# Back to character 
+acled_geo1$ADM4_PCODE <- as.character(acled_geo1$ADM4_PCODE)
+
+# Rename columns in BIHS_admin before the join 
+names(BIHS_admin)[names(BIHS_admin) == "uncode"] <- "ADM4_PCODE"
+
+# Back to character for compatibility of the merge
+acled_geo1$ADM4_PCODE <- as.character(acled_geo1$ADM4_PCODE)
+BIHS_admin$ADM4_PCODE <- as.character(BIHS_admin$ADM4_PCODE)
+
+# Left join - jsut to see how many observations oberlap.
+acled_geo2 <- left_join(acled_geo1, BIHS_admin)
+
+# Have a look at unique values of admin 4 in both data frames
+acled_p4 <- unique(acled_geo1$ADM4_PCODE)
+BIHS_p4 <- unique(BIHS_admin$ADM4_PCODE)
+
+# ACLED data covers 1358 unique unions while BIHS covers 275 unique unions
+
+# Remove ugly columns
+acled_geo1 <- acled_geo1[ , !names(acled_geo1) %in% 
+    c("date","validTo", "validOn")]
+
+# Export ACLED data as a csv file where the "ADM4_PCODE" column corresponds to the "uncode" column from the BIHS data. 
+write.csv(acled_geo1, "ACLED_geo1.csv")
+
+# Clear all
+#rm(list = ls())
+
+```
+
+## 2. DROUGHT DATA ##
+
+The aim is to construct SPEI (standardised precipitation evapo-transpiration index) for Bangladesh. SPEI is a multi-scalar index indicating drought conditions. It is calculated as the difference between precipitation and PET (potential evapotranspiration). Climate data is taken from the CRU (Climatic Research Unit) Version 4 gridded dataset and contains monthly values of PET and precipitation on a 0.5 degrees regular grid over the period 1981-2020. 
+
+# PET (potential evapo-transpiration) data #
+
+Load the PET data (potential evapo-transpiration) merged netCDF file. This data has been merged using cdo climate operators package in Linux and has monthly values of PET for the years 1981-2020 on regular 0.5 degree grid. 
+
+Note: I already did this for the Nigeria paper, so will use the already merged file with global PET files
+
+```{r Load netCDF files, include=FALSE}
+# Set the working directory to netCDF files 
+setwd("C:/Users/idabr/Dropbox (OPML)/DEEP Synthetic Panels Nigeria/Data/CRU Version 4 Climate Data/PET (Potential evapo-transpiration)/Raw data")
+
+# Open the netCDF file. This has already been merged and covers the period 1981-2020. It contains 480 time steps (12 months across 40 years)
+pet_data <- nc_open("merged_pet.nc", write=FALSE, readunlim=TRUE, verbose=FALSE, 
+ 	auto_GMT=TRUE, suppress_dimvals=FALSE, return_on_error=FALSE )
+
+# Data has three dimensions: lon, lat, and time. The variable of interest is "pet" 
+
+# Extract variables - three dimensions 
+lon <- ncvar_get(pet_data, "lon")                # longitude
+lat <- ncvar_get(pet_data, "lat", verbose = F)   # latitude
+t <- ncvar_get(pet_data, "time")                 # time
+
+# Inspect the units that are used in the time dimension
+tunits <- ncatt_get(pet_data,"time","units")
+tunits
+
+#$hasatt
+#[1] TRUE
+
+#$value
+#[1] chr "days since 1900-1-1"
+
+# Store the dimensions of the time variable 
+nt <- dim(t)
+nt
+
+# 480 time units 
+
+# Look at the first few entries from the longitude variable
+head(lat) # 360 values (1st:-89.75) with 0.5 unit spacing
+head(lon) # 720 values(1st: -179.75) with 0.5 unit spacing
+head(t)
+
+# Extract the variable of interest (potential evapo-transpiration)
+pet.array <- ncvar_get(pet_data, "pet") # store the data in a 3-dimensional array
+
+# Checking the dimensions of the array
+dim(pet.array)
+
+# [1] 720 360 480
+# 720 longitudes, 360 latitudes, and 480 time units (12 months across 40 years)
+
+# See what fill value was used for missing data
+fillvalue <- ncatt_get(pet_data, "pet", "_FillValue")
+fillvalue
+
+#[1] 9.96921e+36
+
+# Replace missing values with the usual "NA"
+pet.array[pet.array == fillvalue$value] <- NA
+
+# Note: the array looks like it has loads of missing values. Check?
+head(pet.array)
+
+# Clear all
+#rm(list = ls())
+
+# Close the netCDF file
+nc_close(pet_data)
+
+```
+
+Understand the time variable
+
+Note: the way the time variable is coded in this dataset: each value is a number of days since 1900-1-1 in chronological order.
+
+```{r Process time variable, include=FALSE}
+
+# Convert time -- split the time units string into fields
+tustr <- strsplit(tunits$value, " ")
+tdstr <- strsplit(unlist(tustr)[3], "-")
+tmonth <- as.numeric(unlist(tdstr)[2])
+tday <- as.numeric(unlist(tdstr)[3])
+tyear <- as.numeric(unlist(tdstr)[1])
+
+#chron(time,origin=c(tmonth, tday, tyear))# note: this function does not seem to work with non-numeric or non-character values 
+
+
+# Check the number of non-NA values
+length(na.omit(as.vector(pet.array[,,1])))
+
+# [1] 66501
+```
+
+
+Convert PET into a data frame - name columns according to time steps (monthly data covering 1981-2020). 
+
+```{r Turn PET into a data frame}
+# Create a matrix of lon-lat pairs 
+lonlat <- as.matrix(expand.grid(lon,lat))
+dim(lonlat)
+
+# Make a vector with values for PET
+pet_vec <- as.vector(pet.array)
+length(pet_vec)
+
+# reshape the vector into a matrix
+pet_mat <- matrix(pet_vec, nrow=720*360, ncol=nt)
+dim(pet_mat)
+
+# Inspect the head of the matrix (excluding missing values)
+head(na.omit(pet_mat))
+
+# Create a dataframe using the lon-lat matrix 
+pet_df <- data.frame(cbind(lonlat,pet_mat))
+
+# Assign names according to the original time dimension of the data (days since 1900-1-1)
+names(pet_df) <- c("lon","lat", t)
+# options(width=96)
+head(na.omit(pet_df, 20))
+
+# Now we have a data frame where each column is a point in time (12 months over 40 years) - need to break those down into month and year 
+
+# Create a matrix of month-year combinations 
+
+months <- 1:12
+years <- 1981:2020
+month_names <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+month_year <- as.matrix(expand.grid(months,years))
+dim(month_year)
+
+# Make a list with all combinations of months and years 
+timeref <- list()
+
+# Need to start the loop with the year then month
+for (year in years) {
+  timeref[[length(timeref)+1]] <- paste(year, month_names)
+}
+
+
+# Turn a list into a vector
+timeref_vector <- unlist(timeref)
+
+# Assign month-year combinations as column names for identification
+names(pet_df) <- c("lon", "lat", timeref_vector)
+
+
+```
+
+Leave only points that are relevant for Bangladesh as defined by the shapefile. Make a data frame with just coordinates of the PET data then spatially join with a shapefile.
+
+At the point of this spatial join, we end up with grid cells that fall within Bangladesh - but there should be a way to integrate grid cells at the border as well. Another way to do this would be to turn PET data into a data frame but leave only the extent of Bangadesh --> this would cover even the grid cells at the border 
+
+```{r pet bangladesh}
+# Turn PET data frame into spatial points data frame
+#coordinates(pet_df) <- ~lon+lat
+
+# Set projection as the same for both data frames - based on the projection from the Bangladesh shapefile
+#proj4string(pet_df) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+
+# Perform a spatial join between a spatial points data frame with PET data and a spatial polygons data frame from the Bangladesh shapefile. This function will check whether each spatial point (geographical coordinates) falls inside each polygon and return a data frame with successfully matched information from both spatial objects.
+
+#ID <- over(pet_df, bgd_test)
+#pet_df@data <- cbind( pet_df@data , ID )
+
+# Turn the spatial points data frame into a regular data frame 
+#pet_geo <- as.data.frame(pet_df)
+
+# Remove all rows where adminitrative layers from Bangladesh show up as "NA", i.e. that means those fall outside of Bangladesh and we are not interested in them 
+#pet_geo <- pet_geo[!is.na(pet_geo$ADM4_PCODE), ]  
+
+# Make row names nicer
+#rownames(pet_geo) <- 1:nrow(pet_geo)
+
+# Remove massive data files to free up space
+#rm(pet_df, pet_data, pet_vec, pet.array)
+
+```
+
+
+TEST CHUNK - manually keep only values that fall within the extent of Bangladesh. Extent is given below (this chunk could potentially replace the one above)
+
+92.75 > X (longitude) > 87.75
+26.75 > Y (latitude) > 20.25
+
+
+class      : Extent 
+xmin       : 88.00863 
+xmax       : 92.68031 
+ymin       : 20.59061 
+ymax       : 26.63451 
+
+Note: in the data set negative latitudes represent the southern hemisphere and negative longitudes represent the western hemisphere.
+
+```{r extent}
+# Check extent of the Bangladesh shapefile
+bgd_ext <- extent(bgd_test)
+
+# Manually adjust extent 
+pet_df = pet_df[pet_df$lon >= 87.75 & pet_df$lon <= 92.75,]
+pet_df = pet_df[pet_df$lat >= 20.25 & pet_df$lat <= 26.75,]
+
+# Make a new data frame in case something goes wrong 
+pet_geo <- pet_df
+
+# Make row names nicer
+rownames(pet_geo) <- 1:nrow(pet_geo)
+
+# Remove massive data files to free up space
+rm(pet_df, pet_data, pet_vec, pet.array)
+
+```
+
+
+# Change the units of PET data. The documentation for CRU Version 4 climate data says PET is expressed in mm/day while Precipitation Rate is expressed in mm/month. Going to convert PET into monthly values to match precipitation.
+
+```{r Unit conversion PET}
+
+# Change daily values to monthly - multiply by 30.
+pet_geo[,3:482] <- pet_geo[,3:482]*30
+
+```
+
+
+##  Precipitation data ##
+
+# Load and process raw netCDF file with merged precipitation data (monthly for the period 1981-2020).
+
+```{r Open precipitation data, include=FALSE}
+# Set the working directory to .dat files as an experiment 
+setwd("C:/Users/idabr/Dropbox (OPML)/DEEP Synthetic Panels Nigeria/Data/CRU Version 4 Climate Data/PRE (Precipitation)/Raw data")
+
+# Open the netCDF file. This has already been merged and covers the period 1981-2020. It contains 480 time steps (12 months across 40 years)
+pre_data <- nc_open("merged_pre.nc", write=FALSE, readunlim=TRUE, verbose=FALSE, 
+ 	auto_GMT=TRUE, suppress_dimvals=FALSE, return_on_error=FALSE )
+
+# Data has three dimensions: lon, lat, and time. The variable of interest is "pet" 
+
+# Extract variables - three dimensions 
+lon <- ncvar_get(pre_data, "lon")                # longitude
+lat <- ncvar_get(pre_data, "lat", verbose = F)   # latitude
+t <- ncvar_get(pre_data, "time")                 # time
+
+# Inspect the units that are used in the time dimension
+tunits <- ncatt_get(pre_data,"time","units")
+tunits
+
+#$hasatt
+#[1] TRUE
+
+#$value
+#[1] chr "days since 1900-1-1"
+
+# Store the dimensions of the time variable 
+nt <- dim(t)
+nt
+
+# 480 time units 
+
+# Look at the first few entries from the longitude variable
+head(lat) # 360 values (1st:-89.75) with 0.5 unit spacing
+head(lon) # 720 values(1st: -179.75) with 0.5 unit spacing
+head(t)
+
+# Extract the variable of interest (potential evapo-transpiration)
+pre.array <- ncvar_get(pre_data, "pre") # store the data in a 3-dimensional array
+
+# Checking the dimensions of the array
+dim(pre.array)
+
+# [1] 720 360 480
+# 720 longitudes, 360 latitudes, and 480 time units (12 months across 40 years)
+
+# See what fill value was used for missing data
+fillvalue <- ncatt_get(pre_data, "pre", "_FillValue")
+fillvalue
+
+#[1] 9.96921e+36
+
+# Make some space by removing the massive pet_data
+rm(pet_data)
+
+
+# Need more space - keep just objects for Nigeria
+rm(pet_mat, pet_df)
+rm(pet.array, pet_vec)
+
+# Replace missing values with the usual "NA"
+pre.array[pre.array == fillvalue$value] <- NA
+
+# Note: the array looks like it has loads of missing values. Check?
+head(pre.array)
+
+# Clear all
+#rm(list = ls())
+
+# Close the netCDF file
+nc_close(pre_data)
+```
+
+
+Turn the precipitation netCDF file into a data frame. Assign intuitive markers for time (months from 1981-2020).
+
+```{r Precipitation data frame, include=FALSE}
+
+# Make a vector with values for PRE
+pre_vec <- as.vector(pre.array)
+length(pre_vec)
+
+# reshape the vector into a matrix
+pre_mat <- matrix(pre_vec, nrow=720*360, ncol=nt)
+dim(pre_mat)
+
+# Create a dataframe using the lon-lat matrix 
+pre_df <- data.frame(cbind(lonlat,pre_mat))
+
+# Assign names according to the original time dimension of the data (days since 1900-1-1)
+names(pre_df) <- c("lon","lat", t)
+# options(width=96)
+head(na.omit(pre_df, 20))
+
+# Now we have a data frame where each column is a point in time (12 months over 40 years) - need to break those down into month and year 
+
+# Assign month-year combinations as column names for identification
+names(pre_df) <- c("lon", "lat", timeref_vector)
+```
+
+
+Restrict the sample to data points in Bangladesh - using coordinates from the PET data frame which has been spatially joined with the Bangladesh shapefile 
+
+```{r Bangladesh precipitation}
+# Make a data frmae with just 0.5 degree coordinates that fall within Bangladesh
+BG_coords <- pet_geo[,c("lon", "lat")]
+
+# Left join with the precipitation data frame
+pre_geo <- left_join(BG_coords, pre_df)
+
+# Remove large unnecessary objects to free up space 
+rm(pre_data, pre_df, pre_mat, pre_vec, pre.array)
+```
+
+##  SPEI construction ##
+
+Construct SPEI using the SPEI package in R. As a first step I need a time series of the water balance (precipitation minus potential evapotranspiration). The two data frames with these variables need to have exactly the same dimensions to subtract them from each other. 
+
+```{r Calculate water balance}
+# Create a data frame for PET within Bangladesh that has only columns relating to PET (and not info from the shapefile)
+pet_bgd <- pet_geo[,1:482]
+
+# Subtract PET from precipitation
+water_balance <- pre_geo[,3:482] - pet_bgd[,3:482]
+
+# Append the longitude and latitude
+water_balance['lon'] <- pre_geo$lon
+water_balance['lat'] <- pre_geo$lat
+  
+# Move longitude and latitude to the front
+water_balance <- water_balance %>% 
+  relocate(lat)
+
+water_balance <- water_balance %>% 
+  relocate(lon)
+
+```
+
+
+Construct SPEI. Data needs to be in the following format: Water balance needs to be a column with monthly values of a time series. 
+
+SPEI package parameters:
+
+1) Scale parameter controls the influence of past values. For example, selecting 12 will take into account 12 previous months.
+2) Distribution parameter decides what kind of distribution the data should be fit to. For some reason, log-logistic returns all values while Gamma comes up with NA. I will use log-logistic below.
+3) Reference period: default will be taking into account the whole reference period of the data. In my case that is 1981-2020.
+
+Note: do we want drought measured on different time scales? 1,2,3,4,5 year cumulative drought? 
+
+Brunckhorst (2020) uses a 12-month SPI. Take the value of December for each year.
+
+Calculate 12-month Dec SPEI for all years 2010-2020. In order not to spend 3 years on this, it would be useful to have a loop that goes through these individual years, calcultes SPEI and saves the result as a column in a data frame with lon-lat and X-Y combinations - to be merged back into GHS.
+
+```{r turn water balance into ts}
+# First we need to turn the water balance data frame into a time series 
+
+# Turn lon lat into characters and add column where both are displayed
+BG_coords$lon <- as.character(BG_coords$lon)
+BG_coords$lat <- as.character(BG_coords$lat)
+BG_coords$lonlat <- paste(BG_coords$lon, BG_coords$lat, sep = " ")
+
+# Add the column for lon-lat
+water_balance$lonlat <- BG_coords$lonlat
+
+# Delet individual lon-lat measurements
+water_balance <- water_balance[,3:483]
+
+# Move lon-lat to the front
+water_balance <- water_balance %>% 
+  relocate(lonlat)
+
+# Transpose to make time-series a column
+water_balance_long <- as.data.frame(t(water_balance))
+
+# Make column names lon-lat
+names(water_balance_long) <- water_balance_long[1,]
+
+# Make columns numeric values
+water_balance_long <- sapply(water_balance_long, as.numeric)
+
+# Remove lon-lat
+water_balance_long <- water_balance_long[-1,]
+
+# Declare water balance a time series, specifying the start and end point
+
+water_balance_long <- ts(water_balance_long, start=c(1981,1), end=c(2020,12), frequency=12)
+
+```
+
+SPEI loop
+
+```{r}
+# Store the sequence of years in a vector
+s_years <- 2010:2020
+
+# Create a sequence of months
+all_months <- vec_rep(month_names, 40)
+
+# Create a sequence of years
+all_years <- rep(years,each=12)
+
+
+# Create a list to store fitted values
+fitted_list <- list()
+
+# Loop time
+
+for (i in s_years) {
+spei_list <- spei(water_balance_long, 12, kernel = list(type = 'rectangular', shift = 0),  # Calculate 12-month SPEI 
+distribution = 'log-Logistic', fit = 'ub-pwm', na.rm = TRUE,
+ref.start=NULL, ref.end=c(i,12), x=FALSE, params=NULL)
+fitted <- spei_list$fitted 
+fitted <- as.data.frame(fitted) 
+fitted$month <- all_months
+fitted$year <- all_years
+data <- fitted %>% filter(month =="Dec" & year==i)
+data <- data[,1:154] # number of grid cells
+data <- as.data.frame(t(data))
+data$lon <- BG_coords$lon   # Assign lon and lat
+data$lat <- BG_coords$lat
+fitted_list[[i-2009]] <- data
+
+}
+
+
+# Prepare a data frame
+spei_2010_2020 <- pet_geo[,1:2]
+
+spei_2010_2020 <- fitted_list[[1]]
+colnames(spei_2010_2020)[which(names(spei_2010_2020) == "V1")] <- "SPEI_2010"
+
+
+values <- list()
+for (i in s_years) {
+  values[[i-2009]] <- fitted_list[[i-2009]]$V1
+}
+
+spei_2010_2020$SPEI_2011 <- values[[2]]
+spei_2010_2020$SPEI_2012 <- values[[3]]
+spei_2010_2020$SPEI_2013 <- values[[4]]
+spei_2010_2020$SPEI_2014 <- values[[5]]
+spei_2010_2020$SPEI_2015 <- values[[6]]
+spei_2010_2020$SPEI_2016 <- values[[7]]
+spei_2010_2020$SPEI_2017 <- values[[8]]
+spei_2010_2020$SPEI_2018 <- values[[9]]
+spei_2010_2020$SPEI_2019 <- values[[10]]
+spei_2010_2020$SPEI_2020 <- values[[11]]
+
+
+# Rename rows
+rownames(spei_2010_2020) <- 1:nrow(spei_2010_2020)
+
+# Move longitude and latitude to the front
+spei_2010_2020 <- spei_2010_2020 %>% 
+  relocate(lat)
+
+spei_2010_2020 <- spei_2010_2020 %>% 
+  relocate(lon)
+
+# Remove grid cells with NA values
+spei_2010_2020 <- spei_2010_2020[!is.na(spei_2010_2020$SPEI_2010),]
+
+# Make row names nices
+rownames(spei_2010_2020) <- 1:nrow(spei_2010_2020)
+
+# Now we have 124 grid cells that surround Bangladesh (including at the border)
+
+
+# Attach info from the shapefile 
+# Create a data frame with just geographical info for Bangladesh
+#BG_geo <- pet_geo[,483:500]
+#BG_geo$lon <- pet_geo$lon
+#BG_geo$lat <- pet_geo$lat
+
+# Change to character for compatibility
+#BG_geo$lon <- as.character(BG_geo$lon)
+#BG_geo$lat <- as.character(BG_geo$lat)
+
+# Left join SPEI data
+#spei_2010_2020_bgd <- left_join(spei_2010_2020, BG_geo)
+
+# Make the admin 4 code consistent with BIHS
+#spei_2010_2020_bgd$ADM4_PCODE <- substr(spei_2010_2020_bgd$ADM4_PCODE, 3, 10)
+
+# Remove the first 2 digits from the union code (those refer to admin level 1)
+#spei_2010_2020_bgd$ADM4_PCODE <- substr(spei_2010_2020_bgd$ADM4_PCODE, 3, 10)
+
+# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
+
+# Change to numeric - this will drop 0 at the front 
+#spei_2010_2020_bgd$ADM4_PCODE <- as.numeric(spei_2010_2020_bgd$ADM4_PCODE)
+
+# Back to character 
+#spei_2010_2020_bgd$ADM4_PCODE <- as.character(spei_2010_2020_bgd$ADM4_PCODE)
+
+# Export this as a csv file
+write.csv(spei_2010_2020, "SPEI_2010_20_BGD.csv")
+```
+
+
+## Visualise the data a little to make sure it works ##
+
+So - the grid cells are quite chunky and also it looks like some areas are actually not covered by these 47 grid cells (especially at the border). Check what happened here 
+
+```{r}
+
+# Test for 2010
+spei_2010 <- spei_2010_2020[,1:3]
+
+r_drought <- rasterFromXYZ(spei_2010)
+plot(r_drought)
+
+pal1 <- colorNumeric(c("#B10026", "#E31A1C", "#FFFFCC", "#FC4E2A", "#FD8D3C", "#FEB24C", "#FED976", "#FFEDA0"), values(r_drought),
+  na.color = "transparent")
+
+crs(r_drought) <- sp::CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+
+map5 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(r_drought, colors = pal1, opacity=0.7, project = FALSE)%>%
+  addLegend(pal = pal1, values = values(r_drought), title = "SPEI") 
+
+map5
+```
+
+
+THE R DATA FILE STOPS HERE
+
+Note: the SPEI data is quite aggregated and multiple unions will likely fall within one grid cell. However, the issue is that when I perform a spatial join only one match is found.Make sure that all BIHS locations can be matched with a SPEI value. 
+
+Okay, this doesn't really work --> I think the over function takes the centroid of my coordinate points rather than the entire area covered by the grid cell. I can fix this by converting my coordinate points to polygons then trying to find overlap in areas between polygons.
+
+New idea: Use the disaggregate command! It will create more data points at a higher spatial resolution (even though the actual values are all the same). This helps for the purposes of a spatial join though. The issue atm is that the 47 grid cells do not actually cover the entiretly of Bangladesh:( You can also play around with different spatial resolutions of the disaggregation 
+
+## Match SPEI with BIHS ##
+
+```{r}
+# Make a new data frame
+spei_geo <- spei_2010_2020
+
+# Create another shapefile
+test_data <- bgd_test
+
+# Turn data frame into a raster for spatial disaggregation 
+raster_spei <- rasterFromXYZ(spei_geo)
+
+# Make sure the CRS is consistent with shapefile
+proj4string(raster_spei) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+
+# Disaggregate - this will create a "higher resolution" grid, even though the values of the points falling within the larger grid cell will be the same, this wil allow for the spatial join with a shapefile so that each union has its distinct SPEI data point. You can play around with the factor of disaggregation.
+raster_spei_disag <-  disaggregate(raster_spei, fact=200)
+
+# Turn back into a data frame - now we have more data points
+spei_df <- as.data.frame(raster_spei_disag, xy=TRUE)
+
+# Remove NA values
+spei_df <- na.omit(spei_df)
+
+# Turn into a spatial data frame for a spatial join with the shapefile 
+spei_df$x <- as.numeric(spei_df$x)
+spei_df$y <- as.numeric(spei_df$y)
+coordinates(spei_df) <- ~x+y
+
+# Set CRS as the same - taken from shapefile
+proj4string(spei_df) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+
+# Perform a spatial join with the Bangladesh shapefile
+ID <- over(test_data, spei_df)                               
+test_data@data <- cbind(test_data@data , ID )  
+
+# Turn back into a data frame  
+test_data <- as.data.frame(test_data)
+
+# Check if there are any NA values - currently 6
+summary(test_data)
+
+```
+
+Now match the union-level SPEI information with BIHS locations of households 
+
+```{r BIHS locations SPEI }
+# Make new data frame for this 
+bgd_spei <- test_data
+
+# Create a new data frame with compatible codes
+# Remove unnecessary columns
+
+bgd_spei <- bgd_spei[ , !names(bgd_spei) %in% 
+    c("ADM4_REF","ADM4ALT1EN", "ADM4ALT2EN")]
+
+# Rename the code identifiers for administrative levels - remove BD
+bgd_spei$ADM4_PCODE <- substr(bgd_spei$ADM4_PCODE, 3, 10)
+
+# Remove the first 2 digits from the union code (those refer to admin level 1)
+bgd_spei$ADM4_PCODE <- substr(bgd_spei$ADM4_PCODE, 3, 10)
+
+# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
+
+# Change to numeric - this will drop 0 at the front 
+bgd_spei$ADM4_PCODE <- as.numeric(bgd_spei$ADM4_PCODE)
+
+# Back to character 
+bgd_spei$ADM4_PCODE <- as.character(bgd_spei$ADM4_PCODE)
+
+# Rename columns in BIHS_admin before the join 
+names(BIHS_admin)[names(BIHS_admin) == "uncode"] <- "ADM4_PCODE"
+
+# Back to character for compatibility of the merge
+bgd_spei$ADM4_PCODE <- as.character(bgd_spei$ADM4_PCODE)
+BIHS_admin$ADM4_PCODE <- as.character(BIHS_admin$ADM4_PCODE)
+
+
+```
+
+## Inspect the union codes that did not match manually, then join dataframes ##
+
+For all 14 cases, look at the Stata dta file with BIHS locations that also has labels with names in English. On that basis, find the corresponding ADM4_PCODE in the shapefile, which is different.
+
+1. BIHS code: 193617, BIHS name: Bitikandi, Shapefile ADM4_PCODE: 199417
+2. BIHS code: 198104, BIHS name: Akubpur, Shapefile ADM4_PCODE: 198110
+3. BIHS code: 338609, BIHS name: Barmi, Shapefile ADM4_PCODE: 338621
+4. BIHS code: 354306, BIHS name: Bethuri, Shapefile ADM4_PCODE: 354311
+5. BIHS code: 827395, BIHS name: Saorail, Shapefile ADM4_PCODE: 824795
+6. BIHS code: 935780, BIHS name: Musuddi, Shapefile ADM4_PCODE: 932580
+7. BIHS code: 102056, BIHS name: Majhira , Shapefile ADM4_PCODE: 108556
+8. BIHS code: 105409, BIHS name: Bir Kedar, Shapefile ADM4_PCODE: 105413
+9. BIHS code: 386109, BIHS name: Alampur, Shapefile ADM4_PCODE: 386115
+10. BIHS code: 696312, BIHS name: Bara Harishpur, Shapefile ADM4_PCODE: 696320
+11. BIHS code: 496106, BIHS name: Ballabher Khas, Shapefile ADM4_PCODE: 496111
+12. BIHS code: 855816, BIHS name: Bara Hazratpur, Shapefile ADM4_PCODE: 855826
+13. BIHS code: 857309, BIHS name: Annadanagar, Shapefile ADM4_PCODE: 857317
+14. BIHS code: 857650, BIHS name:  Madankhali, Shapefile ADM4_PCODE: 857656
+
+
+```{r union codes}
+	
+# Look up the union code associated with an English name of the union in the Bangladesh shapefile
+with(bgd_spei, ADM4_PCODE[ADM4_EN =="Madankhali"])
+
+# Create another data frame with values from the Bangladesh shapefile to replace with new matching codes. Here I replace shapefile codes with codes from BIHS.
+bgd_spei_newcodes <- bgd_spei
+
+# Now replace admin 4 codes
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="199417"] <- "193617"  #1
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="198110"] <- "198104"  #2
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="338621"] <- "338609"  #3
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="354311"] <- "354306"  #4
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="824795"] <- "827395"  #5 
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="932580"] <- "935780"  #6
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="108556"] <- "102056"  #7
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="105413"] <- "105409"  #8
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="386115"] <- "386109"  #9
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="696320"] <- "696312"  #10
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="496111"] <- "496106"  #11
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="855826"] <- "855816"  #12
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="857317"] <- "857309"  #13
+bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="857656"] <- "857650"  #14
+
+# Left join - just to see how many observations overlap.
+BIHS_drought <- left_join(BIHS_admin, bgd_spei_newcodes)
+
+# Remove ugly columns
+BIHS_drought <- BIHS_drought[ , !names(BIHS_drought) %in% 
+    c("date","validTo", "validOn")]
+
+# Export BIHS data matched with flood data a csv file where the "ADM4_PCODE" column corresponds to the "uncode" column from the BIHS data. 
+write.csv(BIHS_drought, "BIHS_drought.csv")
+
+# Check for missing values - no NAs :)
+summary(BIHS_drought)
+
+# Save workspace
+save.image("C:/Users/idabr/Dropbox (OPML)/DEEP Conflict and Climate Bangladesh/Code/Drought workspace FINAL.RData")
+```
+

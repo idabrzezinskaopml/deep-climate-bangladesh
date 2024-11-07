@@ -1,0 +1,346 @@
+---
+title: "DEEP Nigeria crises spatial differencing"
+output: html_document
+date: '2022-12-07'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load relevant packages ##
+---
+```{r Load R libraries, include=FALSE}
+library("plyr")                     # Load plyr package
+library("dplyr")                   # Load dplyr package
+library("readr")                    # Load readr package
+library("tidyr")                    # Data manipulation
+library("rgdal")                    # package for geospatial analysis
+library("ggplot2")                  # package for plotting
+library("stargazer")                # For LaTeX tables
+library("AER")                      # Robust standard errors
+library("rworldmap")                # Mapping country boundaries
+library("leaflet")                  # Fancy interactive maps
+library("chron")                    # Manipulating the time variable in a netCDF file
+library("lattice")                  # netCDF files
+library("RColorBrewer")             # net CDF files
+library("reshape2")                 # reshape long
+library("haven")                    # Load dta files
+library("foreign")                  # Export dta files
+library("vctrs")                    # Vector operations
+library("geosphere")                # To find distance between geographic coordinates
+library("plm")                      # For panel data and first difference
+
+```
+
+
+# Import .dta - strongly balanced BIHS panel for years 2011, 2015, 2019 with climatic and conflict variables merged in ##
+
+Notes from Vidya on which variables to use for differencing:
+
+FYI here are the variables I used in the main multinomial logistic regression: qui mlogit pov4 i.fatalitiesany1119 i.drought_any111915 i.floods_any1119 hhsize hhage hhage2 hhfemale i.relig hhedupri hhemp_agri nfe logAV lsT remitany i.region [pw=hhweight], vce(cluster cluster) base(3)
+
+
+```{r import BIHS panel}
+# Set working directory for this chunk
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/BIHS data")
+
+# Import .dta file with BIHS + drought and flood variables - to match with what Vidya has been using for regression.
+
+BPanel_reg <- read_dta('BPanel_short.dta')
+
+# Clear all
+#rm(list = ls())
+```
+
+# Import centroids of union #
+
+There is already an excel file which has BIHS union centroids that can be matched to the union code
+
+```{r}
+# Set working directory for this chunk
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Code")
+
+# Import excel 
+BIHS_lonlat <- read_csv("BIHS_lonlat.csv")
+
+# Keep only necessary columns
+BIHS_lonlat <- BIHS_lonlat[, c("uncode", "longitude", "latitude")]
+
+# Merge the two data frames 
+BPanel_reg <- left_join(BPanel_reg, BIHS_lonlat)
+
+# Check for missing values
+summary(BPanel_reg$longitude)
+summary(BPanel_reg$latitude)
+
+# No missing values
+```
+
+
+# First create a matrix of distances between any two points ##
+
+Note: Since we do not have GPS coordinates, we will need to rely on unions (admin level 4). I will use the centroid (lon, lat) of the union to conduct spatial differencing across a range of radii (e.g. 100km, 50km and so on). 
+
+```{r create a coordinates matrix}
+# Create a data frame for just the coordinate points 
+coordinates <- BPanel_reg[, c('longitude', 'latitude')]
+
+# Put coordinates in a matrix 
+coordsmatrix <- data.matrix(coordinates)
+
+# Create a distance matrix for points within 100km 
+res<- distm(coordsmatrix,fun=distGeo)<=100000
+
+# Output is logical - either TRUE or FALSE depending on whether the condition is met 
+
+# Create a distance matrix for points within 50km
+res_50km<- distm(coordsmatrix,fun=distGeo)<=50000
+
+# And 200km
+#res_200km<- distm(coordsmatrix,fun=distGeo)<=200000
+
+# Check survey years
+unique(BPanel_reg$year)
+
+```
+
+'# Create indicators of interest for flood and drought
+
+To use a difference-in-spatial-differences (DSD) estimator you need indicators that are assigned to specific survey years - such as whether there was a drought in the survey year or cumulative droughts until sample year 
+
+Note: my sense is that SPEI < -1.5 is the only definition we should use as it is consistent with meteorological definition of drought. With floods, there is only one definition, which is whether the household was residing in a particular union that was flooded
+
+Given the BIHS data covers periods 2011, 2015, and 2019, but flood data from the GFD only goes until 2018 - I will assign floods from 2018 to the 2019 year of BIHS data.
+
+```{r create drought/ flood indicators}
+# First a dummy for whether a HH experienced a flood/ drought in the survey year 
+BPanel_reg$dum_flood <- 0
+BPanel_reg$dum_drought <- 0
+
+# Replace for each survey year: wave 1 (2011), wave 2 (2015), wave 3 (2019) - drought (SPEI < -1.5)
+BPanel_reg$dum_drought[BPanel_reg$SPEI_2010 < -1.5 & BPanel_reg$year ==2011] <- 1 
+BPanel_reg$dum_drought[BPanel_reg$SPEI_2015 < -1.5 & BPanel_reg$year ==2015] <- 1 
+BPanel_reg$dum_drought[BPanel_reg$SPEI_2019 < -1.5 & BPanel_reg$year ==2019] <- 1 
+
+# Replace for each survey year: wave 1 (2010), wave 2 (2012), wave 3 (2015), wave 4 (2019) - flood (union-level)
+
+# Get column names for flood dates
+colnames(BPanel_reg)
+
+# First a variable capturing flood conditions if there was more than one in a year 
+BPanel_reg$flood_2011 <-  BPanel_reg$f_20110721 + BPanel_reg$f_20110815 + BPanel_reg$f_20110815_2 + BPanel_reg$f_20110905
+BPanel_reg$flood_2015 <- BPanel_reg$f_20150602 + BPanel_reg$f_20150715 + BPanel_reg$f_20150715_2 + BPanel_reg$f_20150813
+BPanel_reg$flood_2018 <- BPanel_reg$f_20180615 + BPanel_reg$f_20180802 + BPanel_reg$f_20180715 + BPanel_reg$f_20180901
+  
+
+BPanel_reg$dum_flood[BPanel_reg$flood_2011 > 0 & BPanel_reg$year ==2010] <- 1 
+BPanel_reg$dum_flood[BPanel_reg$flood_2015 > 0 & BPanel_reg$year ==2015] <- 1 
+BPanel_reg$dum_flood[BPanel_reg$flood_2018 > 0  & BPanel_reg$year ==2019] <- 1 
+
+```
+
+
+# Create variable for regional trends
+
+Does this need to be spatially differenced too? Makes all the other coefficients appear very small in a regression so perhaps yes 
+
+```{r}
+# Region
+BPanel_reg$trend_region <- BPanel_reg$region*BPanel_reg$year
+
+```
+
+# Create dummies for violence
+
+```{r conflict dummies}
+# Create a dummy for whether there was a presence of conflict 
+BPanel_reg$dum_violence <- 0
+
+# Replace values if there were any fatalities
+BPanel_reg$dum_violence[BPanel_reg$fatalitiesnew > 0] <- 1 
+```
+
+
+# SFD - 100 km radius version 
+
+Loop to find all points within 100 km and calculate differenced outcomes
+
+The code below will:
+1. Loop through each row of the 'res' matrix and find columns with TRUE - that is observations that are within 100 km
+2. Create a subset of observations within 100km 
+3. Find the average of X and Y for those observations
+4. Calculate the difference for each individual observation from the X,Y 100km average
+
+Use the variable "poor" as outcome, which is the binary variable indicating
+
+Loop is now automated (more or less) :)
+
+```{r sfd 100 km}
+# Prepare a data frame with just indicators of interest
+bangladesh_vars <- BPanel_reg[, c("poor", "fatalitiesany1119", "drought_any111915", "floods_any1119", "hhsize", "hhage", "hhage2", "hhfemale", "relig", "hhedupri", "hhemp_agri", "nfe", "logAV", "lsT", "remitany", "region", "dum_flood", "dum_drought", "dum_violence", "trend_region", "year")]
+
+# Get number of variables (number of columns) and observations
+col_num <- as.numeric(ncol(bangladesh_vars))
+col_num_l1 <- col_num-1   # number of columns less 1 for the loop
+row_num <- as.numeric(nrow(BPanel_reg))
+
+# Loop time 
+
+for (n in 1:col_num_l1) {
+  data_var <- bangladesh_vars[,c(n, col_num)]              # create a data frame with just the variable to be differenced + wave
+  list_vars <- list()                             # create a list to store differenced variables 
+  var_name <- colnames(bangladesh_vars[,n])           # get column name to store 
+  names(bangladesh_vars)[names(bangladesh_vars) == var_name] <- "temp_name"
+
+for (i in 1: row_num) {                               # for each observation
+  list  <- which(res[i,],  arr.ind = T)           # make a list of observations that are within a 100km radius
+  newdata <- data_var[list,]                        # create a new data frame with just these observations
+  year_same <- data_var[i,]$year              # identify the survey wave associated with the central observation
+  newdata <- subset(newdata, newdata$year==year_same) # leave only a subset of observations that are within the same year
+  newdata[, 1] <- sapply(newdata[, 1], as.numeric) # convert column to numeric
+  names(newdata)[names(newdata) == var_name] <- "test"  # change column name before getting the mean
+  avgvar100km <- mean(newdata$test)           # find the average of the variable in the 100 km radius
+  list_vars[[i]] <- avgvar100km - bangladesh_vars[i,]$temp_name       
+}
+  BPanel_reg$var <- as.numeric(list_vars)
+  names(BPanel_reg)[names(BPanel_reg) == 'var'] <- paste(var_name, "100km", sep="_") 
+}
+
+
+```
+
+
+SFD - 50km version
+
+Note: given the size of the drought grid cell and definition of floods at union level, 50km spatial differencing might have insufficient variation - but let's try it
+
+```{r sfd 50 km}
+# Prepare a data frame with just indicators of interest
+bangladesh_vars <- BPanel_reg[, c("poor", "fatalitiesany1119", "drought_any111915", "floods_any1119", "hhsize", "hhage", "hhage2", "hhfemale", "relig", "hhedupri", "hhemp_agri", "nfe", "logAV", "lsT", "remitany", "region", "dum_flood", "dum_drought", "dum_violence", "trend_region", "year")]
+
+# Get number of variables (number of columns) and observations
+col_num <- as.numeric(ncol(bangladesh_vars))
+col_num_l1 <- col_num-1   # number of columns less 1 for the loop
+row_num <- as.numeric(nrow(BPanel_reg))
+
+# Loop time 
+
+for (n in 1:col_num_l1) {
+  data_var <- bangladesh_vars[,c(n, col_num)]              # create a data frame with just the variable to be differenced + wave
+  list_vars <- list()                             # create a list to store differenced variables 
+  var_name <- colnames(bangladesh_vars[,n])           # get column name to store 
+  names(bangladesh_vars)[names(bangladesh_vars) == var_name] <- "temp_name"
+
+for (i in 1: row_num) {                               # for each observation
+  list  <- which(res_50km[i,],  arr.ind = T)           # make a list of observations that are within a 100km radius
+  newdata <- data_var[list,]                        # create a new data frame with just these observations
+  year_same <- data_var[i,]$year              # identify the survey wave associated with the central observation
+  newdata <- subset(newdata, newdata$year==year_same) # leave only a subset of observations that are within the same year
+  newdata[, 1] <- sapply(newdata[, 1], as.numeric) # convert column to numeric
+  names(newdata)[names(newdata) == var_name] <- "test"  # change column name before getting the mean
+  avgvar50km <- mean(newdata$test)           # find the average of the variable in the 100 km radius
+  list_vars[[i]] <- avgvar50km - bangladesh_vars[i,]$temp_name       
+}
+  BPanel_reg$var <- as.numeric(list_vars)
+  names(BPanel_reg)[names(BPanel_reg) == 'var'] <- paste(var_name, "50km", sep="_") 
+}
+
+
+```
+
+# FE Regression test - SFD 100 km ##
+
+## VIDYA'S PREFERRED VERSION ##
+
+MAIN SPECIFICATION with a sub-set of controls 100km differencing 
+
+FYI here are the variables I used in the main multinomial logistic regression: qui mlogit pov4 i.fatalitiesany1119 i.drought_any111915 i.floods_any1119 hhsize hhage hhage2 hhfemale i.relig hhedupri hhemp_agri nfe logAV lsT remitany i.region [pw=hhweight], vce(cluster cluster) base(3)
+
+```{r}
+# Drought
+model20 <- plm(poor_100km ~ dum_drought_100km + hhsize_100km + hhage_100km + hhage2_100km + hhfemale_100km  +  hhedupri_100km + hhemp_agri_100km + nfe_100km + logAV_100km + lsT_100km + remitany_100km + trend_region_50km,
+              data = BPanel_reg,
+              index = c("HHID", "year"),       # select panel dimensions
+             model = "within")
+
+coeftest(model20, vcov=function(x) vcovHC(x, cluster="group", type="HC1"))
+
+# Flood
+model21 <- plm(poor_100km ~ dum_flood_100km + hhsize_100km + hhage_100km + hhage2_100km + hhfemale_100km  +  hhedupri_100km + hhemp_agri_100km + nfe_100km + logAV_100km + lsT_100km + remitany_100km + trend_region_50km,
+              data = BPanel_reg,
+              index = c("HHID", "year"),       # select panel dimensions
+             model = "within")
+
+coeftest(model21, vcov=function(x) vcovHC(x, cluster="group", type="HC1"))
+
+# Violence
+model22 <- plm(poor_100km ~ dum_violence_100km + hhsize_100km + hhage_100km + hhage2_100km + hhfemale_100km  +  hhedupri_100km + hhemp_agri_100km + nfe_100km + logAV_100km + lsT_100km + remitany_100km + trend_region_50km,
+              data = BPanel_reg,
+              index = c("HHID", "year"),       # select panel dimensions
+             model = "within")
+
+coeftest(model22, vcov=function(x) vcovHC(x, cluster="group", type="HC1"))
+
+
+# Gather standard errors 
+rob_se <- list(sqrt(diag(vcovHC(model20, type = "HC0", cluster = "group"))), sqrt(diag(vcovHC(model21, type = "HC0", cluster = "group"))), sqrt(diag(vcovHC(model22, type = "HC0", cluster = "group"))))
+
+# Publication-style table 
+stargazer(model20, model21, model22,
+          se = rob_se,
+          keep.stat = c("n", "rsq"),
+          type = "html",
+          title = "Poverty and crises in Bangladesh",
+          notes = "Household and year fixed effects applied and robust standard errors used in all specifications.",
+          out = "bangladesh_reg.html")
+
+```
+
+# FE Regression test - SFD 50 km ##
+
+```{r sfd 50 km}
+# Drought
+model23 <- plm(poor_50km ~ dum_drought_50km + hhsize_50km + hhage_50km + hhage2_50km + hhfemale_50km  +  hhedupri_50km + hhemp_agri_50km + nfe_50km + logAV_50km + lsT_50km + remitany_50km + trend_region_50km,
+              data = BPanel_reg,
+              index = c("HHID", "year"),       # select panel dimensions
+             model = "within")
+
+coeftest(model23, vcov=function(x) vcovHC(x, cluster="group", type="HC1"))
+
+# Flood
+model24 <- plm(poor_50km ~ dum_flood_50km + hhsize_50km + hhage_50km + hhage2_50km + hhfemale_50km  +  hhedupri_50km + hhemp_agri_50km + nfe_50km + logAV_50km + lsT_50km + remitany_50km + trend_region_50km,
+              data = BPanel_reg,
+              index = c("HHID", "year"),       # select panel dimensions
+             model = "within")
+
+coeftest(model24, vcov=function(x) vcovHC(x, cluster="group", type="HC1"))
+
+# Violence
+model25 <- plm(poor_50km ~ dum_violence_50km + hhsize_50km + hhage_50km + hhage2_50km + hhfemale_50km  +  hhedupri_50km + hhemp_agri_50km + nfe_50km + logAV_50km + lsT_50km + remitany_50km + trend_region_50km,
+              data = BPanel_reg,
+              index = c("HHID", "year"),       # select panel dimensions
+             model = "within")
+
+coeftest(model25, vcov=function(x) vcovHC(x, cluster="group", type="HC1"))
+
+
+# Gather standard errors 
+rob_se1 <- list(sqrt(diag(vcovHC(model23, type = "HC0", cluster = "group"))), sqrt(diag(vcovHC(model24, type = "HC0", cluster = "group"))), sqrt(diag(vcovHC(model25, type = "HC0", cluster = "group"))))
+
+# Publication-style table 
+stargazer(model23, model24, model25,
+          se = rob_se1,
+          keep.stat = c("n", "rsq"),
+          type = "html",
+          title = "Poverty and crises in Bangladesh",
+          notes = "Household and year fixed effects applied and robust standard errors used in all specifications.",
+          out = "bangladesh_reg50km.html")
+```
+
+# Save Rdata #
+
+```{r save rdata}
+save.image(file="1.RData") 
+```
+
