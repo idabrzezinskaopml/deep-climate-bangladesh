@@ -12,5 +12,6 @@ This repository contains code for climate analysis in Diwakar, V., Brzezinska, I
 
 | Script  | Description |
 | ------------- | ------------- |
-| bangladesh_drought.Rmd | Construct Standardised Precipitation-Evapotranspiration Index (SPEI), a multi-scalar measure of drought, match household and drought data, and visualise drought in Bangladesh |
-| bangladesh_flood.Rmd  | Match flood events with household data and visualise floods |
+| 01_bgd_conflict_hh.Rmd | Spatially join conflict and household data |
+| 02_bgd_drought  | Construct drought measure |
+| 03_bgd_hh_drought_join  | Spatially join drought and household data |
