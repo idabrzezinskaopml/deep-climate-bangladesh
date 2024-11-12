@@ -1,0 +1,513 @@
+---
+title: "Drought data Bangladesh"
+output: html_document
+date: "2024-11-12"
+---
+
+```{r libraries}
+library("ncdf4")                    # package for netcdf manipulation
+library("raster")                   # package for raster manipulation
+library("SPEI")                     # SPEI construction
+library("vctrs")                    # Vector operations
+library("leaflet")                  # Interactive maps
+library("htmlwidgets")              # HTML widgets
+library("RColorBrewer")             # Nice colours
+```
+
+## 2. DROUGHT DATA ##
+
+The aim is to construct SPEI (standardised precipitation evapo-transpiration index) for Bangladesh. SPEI is a multi-scalar index indicating drought conditions. It is calculated as the difference between precipitation and PET (potential evapotranspiration). Climate data is taken from the CRU (Climatic Research Unit) Version 4 gridded dataset and contains monthly values of PET and precipitation on a 0.5 degrees regular grid over the period 1981-2020. 
+
+# PET (potential evapo-transpiration) data #
+
+Load the PET data (potential evapo-transpiration) merged netCDF file. This data has been merged using cdo climate operators package in Linux and has monthly values of PET for the years 1981-2020 on regular 0.5 degree grid. 
+
+Note: Since I already processed the same drought data for the Nigeria paper, I will use the same precipitation and PET data for efficiency.
+
+```{r Load netCDF files, include=FALSE}
+# Set the working directory to netCDF files 
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Multiple Crises Poverty Nigeria/Data/CRU Version 4 Climate Data/PET (Potential evapo-transpiration)/Raw data")
+
+# Open the netCDF file. This has already been merged and covers the period 1981-2020. It contains 480 time steps (12 months across 40 years)
+pet_data <- nc_open("merged_pet.nc", write=FALSE, readunlim=TRUE, verbose=FALSE, 
+ 	auto_GMT=TRUE, suppress_dimvals=FALSE, return_on_error=FALSE )
+
+# Data has three dimensions: lon, lat, and time. The variable of interest is "pet" 
+
+# Extract variables - three dimensions 
+lon <- ncvar_get(pet_data, "lon")                # longitude
+lat <- ncvar_get(pet_data, "lat", verbose = F)   # latitude
+t <- ncvar_get(pet_data, "time")                 # time
+
+# Inspect the units that are used in the time dimension
+tunits <- ncatt_get(pet_data,"time","units")
+tunits
+
+# Store the dimensions of the time variable 
+nt <- dim(t)
+nt
+
+# 480 time units 
+
+# Look at the first few entries from the longitude variable
+head(lat) # 360 values (1st:-89.75) with 0.5 unit spacing
+head(lon) # 720 values(1st: -179.75) with 0.5 unit spacing
+head(t)
+
+# Extract the variable of interest (potential evapo-transpiration)
+pet.array <- ncvar_get(pet_data, "pet") # store the data in a 3-dimensional array
+
+# Checking the dimensions of the array
+dim(pet.array)
+
+# [1] 720 360 480
+# 720 longitudes, 360 latitudes, and 480 time units (12 months across 40 years)
+
+# See what fill value was used for missing data
+fillvalue <- ncatt_get(pet_data, "pet", "_FillValue")
+fillvalue
+
+#[1] 9.96921e+36
+
+# Replace missing values with the usual "NA"
+pet.array[pet.array == fillvalue$value] <- NA
+
+# Note: the array looks like it has loads of missing values. Check?
+head(pet.array)
+
+# Clear all
+#rm(list = ls())
+
+# Close the netCDF file
+nc_close(pet_data)
+
+```
+
+Understand the time variable
+
+Note: the way the time variable is coded in this dataset: each value is a number of days since 1900-1-1 in chronological order.
+
+```{r Process time variable, include=FALSE}
+
+# Convert time -- split the time units string into fields
+tustr <- strsplit(tunits$value, " ")
+tdstr <- strsplit(unlist(tustr)[3], "-")
+tmonth <- as.numeric(unlist(tdstr)[2])
+tday <- as.numeric(unlist(tdstr)[3])
+tyear <- as.numeric(unlist(tdstr)[1])
+
+#chron(time,origin=c(tmonth, tday, tyear))# note: this function does not seem to work with non-numeric or non-character values 
+
+
+# Check the number of non-NA values
+length(na.omit(as.vector(pet.array[,,1])))
+
+# [1] 66501
+```
+
+
+Convert PET into a data frame - name columns according to time steps (monthly data covering 1981-2020). 
+
+```{r Turn PET into a data frame}
+# Create a matrix of lon-lat pairs 
+lonlat <- as.matrix(expand.grid(lon,lat))
+dim(lonlat)
+
+# Make a vector with values for PET
+pet_vec <- as.vector(pet.array)
+length(pet_vec)
+
+# reshape the vector into a matrix
+pet_mat <- matrix(pet_vec, nrow=720*360, ncol=nt)
+dim(pet_mat)
+
+# Inspect the head of the matrix (excluding missing values)
+head(na.omit(pet_mat))
+
+# Create a dataframe using the lon-lat matrix 
+pet_df <- data.frame(cbind(lonlat,pet_mat))
+
+# Assign names according to the original time dimension of the data (days since 1900-1-1)
+names(pet_df) <- c("lon","lat", t)
+# options(width=96)
+head(na.omit(pet_df, 20))
+
+# Now we have a data frame where each column is a point in time (12 months over 40 years) - need to break those down into month and year 
+
+# Create a matrix of month-year combinations 
+
+months <- 1:12
+years <- 1981:2020
+month_names <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+month_year <- as.matrix(expand.grid(months,years))
+dim(month_year)
+
+# Make a list with all combinations of months and years 
+timeref <- list()
+
+# Need to start the loop with the year then month
+for (year in years) {
+  timeref[[length(timeref)+1]] <- paste(year, month_names)
+}
+
+
+# Turn a list into a vector
+timeref_vector <- unlist(timeref)
+
+# Assign month-year combinations as column names for identification
+names(pet_df) <- c("lon", "lat", timeref_vector)
+
+
+```
+
+Leave only points that are relevant for Bangladesh as defined by the shapefile. 
+
+```{r shapefile}
+# Set working directory 
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Administrative boundary shapefiles/bgd_adm_bbs_20201113_shp/bgd_adm_bbs_20201113_SHP")
+
+# Load the shapefile
+bgd_admin4 <- read_sf("bgd_admbnda_adm4_bbs_20201113.shp")
+
+# Check the extent 
+extent(bgd_admin4)
+```
+
+
+Keep only values that fall within the extent of Bangladesh. Extent is given below 
+
+92.75 > X (longitude) > 87.75
+26.75 > Y (latitude) > 20.25
+
+
+class      : Extent 
+xmin       : 88.00863 
+xmax       : 92.68031 
+ymin       : 20.59061 
+ymax       : 26.63451 
+
+Note: in the data set negative latitudes represent the southern hemisphere and negative longitudes represent the western hemisphere.
+
+```{r extent}
+# Manually adjust extent 
+pet_df = pet_df[pet_df$lon >= 87.75 & pet_df$lon <= 92.75,]
+pet_df = pet_df[pet_df$lat >= 20.25 & pet_df$lat <= 26.75,]
+
+# Make a new data frame in case something goes wrong 
+pet_geo <- pet_df
+
+# Make row names nicer
+rownames(pet_geo) <- 1:nrow(pet_geo)
+
+# Remove massive data files to free up space
+rm(pet_df, pet_data, pet_vec, pet.array)
+
+```
+
+
+# Change the units of PET data. The documentation for CRU Version 4 climate data says PET is expressed in mm/day while Precipitation Rate is expressed in mm/month. Going to convert PET into monthly values to match precipitation.
+
+```{r Unit conversion PET}
+
+# Change daily values to monthly - multiply by 30.
+pet_geo[,3:482] <- pet_geo[,3:482]*30
+
+```
+
+
+##  Precipitation data ##
+
+# Load and process raw netCDF file with merged precipitation data (monthly for the period 1981-2020).
+
+```{r Open precipitation data, include=FALSE}
+# Set the working directory to .dat files as an experiment 
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Multiple Crises Poverty Nigeria/Data/CRU Version 4 Climate Data/PRE (Precipitation)/Raw data")
+
+# Open the netCDF file. This has already been merged and covers the period 1981-2020. It contains 480 time steps (12 months across 40 years)
+pre_data <- nc_open("merged_pre.nc", write=FALSE, readunlim=TRUE, verbose=FALSE, 
+ 	auto_GMT=TRUE, suppress_dimvals=FALSE, return_on_error=FALSE )
+
+# Data has three dimensions: lon, lat, and time. The variable of interest is "pet" 
+
+# Extract variables - three dimensions 
+lon <- ncvar_get(pre_data, "lon")                # longitude
+lat <- ncvar_get(pre_data, "lat", verbose = F)   # latitude
+t <- ncvar_get(pre_data, "time")                 # time
+
+# Inspect the units that are used in the time dimension
+tunits <- ncatt_get(pre_data,"time","units")
+tunits
+
+# Store the dimensions of the time variable 
+nt <- dim(t)
+nt
+
+# 480 time units 
+
+# Look at the first few entries from the longitude variable
+head(lat) # 360 values (1st:-89.75) with 0.5 unit spacing
+head(lon) # 720 values(1st: -179.75) with 0.5 unit spacing
+head(t)
+
+# Extract the variable of interest (potential evapo-transpiration)
+pre.array <- ncvar_get(pre_data, "pre") # store the data in a 3-dimensional array
+
+# Checking the dimensions of the array
+dim(pre.array)
+
+# [1] 720 360 480
+# 720 longitudes, 360 latitudes, and 480 time units (12 months across 40 years)
+
+# See what fill value was used for missing data
+fillvalue <- ncatt_get(pre_data, "pre", "_FillValue")
+fillvalue
+
+#[1] 9.96921e+36
+
+# Make some space by removing the massive pet_data
+rm(pet_data)
+
+
+# Need more space - keep just objects for Nigeria
+rm(pet_mat, pet_df)
+rm(pet.array, pet_vec)
+
+# Replace missing values with the usual "NA"
+pre.array[pre.array == fillvalue$value] <- NA
+
+# Note: the array looks like it has loads of missing values. Check?
+head(pre.array)
+
+# Clear all
+#rm(list = ls())
+
+# Close the netCDF file
+nc_close(pre_data)
+```
+
+
+Turn the precipitation netCDF file into a data frame. Assign intuitive markers for time (months from 1981-2020).
+
+```{r Precipitation data frame, include=FALSE}
+
+# Make a vector with values for PRE
+pre_vec <- as.vector(pre.array)
+length(pre_vec)
+
+# reshape the vector into a matrix
+pre_mat <- matrix(pre_vec, nrow=720*360, ncol=nt)
+dim(pre_mat)
+
+# Create a dataframe using the lon-lat matrix 
+pre_df <- data.frame(cbind(lonlat,pre_mat))
+
+# Assign names according to the original time dimension of the data (days since 1900-1-1)
+names(pre_df) <- c("lon","lat", t)
+# options(width=96)
+head(na.omit(pre_df, 20))
+
+# Now we have a data frame where each column is a point in time (12 months over 40 years) - need to break those down into month and year 
+
+# Assign month-year combinations as column names for identification
+names(pre_df) <- c("lon", "lat", timeref_vector)
+```
+
+
+Restrict the sample to data points in Bangladesh - using coordinates from the PET data frame which has been spatially joined with the Bangladesh shapefile 
+
+```{r Bangladesh precipitation}
+# Make a data frmae with just 0.5 degree coordinates that fall within Bangladesh
+BG_coords <- pet_geo[,c("lon", "lat")]
+
+# Left join with the precipitation data frame
+pre_geo <- left_join(BG_coords, pre_df)
+
+# Remove large unnecessary objects to free up space 
+rm(pre_data, pre_df, pre_mat, pre_vec, pre.array)
+```
+
+##  SPEI construction ##
+
+Construct SPEI using the SPEI package in R. As a first step I need a time series of the water balance (precipitation minus potential evapotranspiration). The two data frames with these variables need to have exactly the same dimensions to subtract them from each other. 
+
+```{r Calculate water balance}
+# Create a data frame for PET within Bangladesh that has only columns relating to PET (and not info from the shapefile)
+pet_bgd <- pet_geo[,1:482]
+
+# Subtract PET from precipitation
+water_balance <- pre_geo[,3:482] - pet_bgd[,3:482]
+
+# Append the longitude and latitude
+water_balance['lon'] <- pre_geo$lon
+water_balance['lat'] <- pre_geo$lat
+  
+# Move longitude and latitude to the front
+water_balance <- water_balance %>% 
+  relocate(lat)
+
+water_balance <- water_balance %>% 
+  relocate(lon)
+
+```
+
+
+Construct SPEI. Data needs to be in the following format: Water balance needs to be a column with monthly values of a time series. 
+
+SPEI package parameters:
+
+1) Scale parameter controls the influence of past values. For example, selecting 12 will take into account 12 previous months.
+2) Distribution parameter decides what kind of distribution the data should be fit to. For some reason, log-logistic returns all values while Gamma comes up with NA. I will use log-logistic below.
+3) Reference period: default will be taking into account the whole reference period of the data. In my case that is 1981-2020.
+
+Note: do we want drought measured on different time scales? 1,2,3,4,5 year cumulative drought? 
+
+Brunckhorst (2020) uses a 12-month SPI. Take the value of December for each year.
+
+Calculate 12-month Dec SPEI for all years 2010-2020. In order not to spend 3 years on this, it would be useful to have a loop that goes through these individual years, calcultes SPEI and saves the result as a column in a data frame with lon-lat and X-Y combinations 
+
+```{r turn water balance into ts}
+# First we need to turn the water balance data frame into a time series 
+
+# Turn lon lat into characters and add column where both are displayed
+BG_coords$lon <- as.character(BG_coords$lon)
+BG_coords$lat <- as.character(BG_coords$lat)
+BG_coords$lonlat <- paste(BG_coords$lon, BG_coords$lat, sep = " ")
+
+# Add the column for lon-lat
+water_balance$lonlat <- BG_coords$lonlat
+
+# Delet individual lon-lat measurements
+water_balance <- water_balance[,3:483]
+
+# Move lon-lat to the front
+water_balance <- water_balance %>% 
+  relocate(lonlat)
+
+# Transpose to make time-series a column
+water_balance_long <- as.data.frame(t(water_balance))
+
+# Make column names lon-lat
+names(water_balance_long) <- water_balance_long[1,]
+
+# Make columns numeric values
+water_balance_long <- sapply(water_balance_long, as.numeric)
+
+# Remove lon-lat
+water_balance_long <- water_balance_long[-1,]
+
+# Declare water balance a time series, specifying the start and end point
+
+water_balance_long <- ts(water_balance_long, start=c(1981,1), end=c(2020,12), frequency=12)
+
+```
+
+SPEI loop
+
+```{r}
+# Store the sequence of years in a vector
+s_years <- 2010:2020
+
+# Create a sequence of months
+all_months <- vec_rep(month_names, 40)
+
+# Create a sequence of years
+all_years <- rep(years,each=12)
+
+
+# Create a list to store fitted values
+fitted_list <- list()
+
+# Loop time
+
+for (i in s_years) {
+spei_list <- spei(water_balance_long, 12, kernel = list(type = 'rectangular', shift = 0),  # Calculate 12-month SPEI 
+distribution = 'log-Logistic', fit = 'ub-pwm', na.rm = TRUE,
+ref.start=NULL, ref.end=c(i,12), x=FALSE, params=NULL)
+fitted <- spei_list$fitted 
+fitted <- as.data.frame(fitted) 
+fitted$month <- all_months
+fitted$year <- all_years
+data <- fitted %>% filter(month =="Dec" & year==i)
+data <- data[,1:154] # number of grid cells
+data <- as.data.frame(t(data))
+data$lon <- BG_coords$lon   # Assign lon and lat
+data$lat <- BG_coords$lat
+fitted_list[[i-2009]] <- data
+
+}
+
+
+# Prepare a data frame
+spei_2010_2020 <- pet_geo[,1:2]
+
+spei_2010_2020 <- fitted_list[[1]]
+colnames(spei_2010_2020)[which(names(spei_2010_2020) == "V1")] <- "SPEI_2010"
+
+
+values <- list()
+for (i in s_years) {
+  values[[i-2009]] <- fitted_list[[i-2009]]$V1
+}
+
+spei_2010_2020$SPEI_2011 <- values[[2]]
+spei_2010_2020$SPEI_2012 <- values[[3]]
+spei_2010_2020$SPEI_2013 <- values[[4]]
+spei_2010_2020$SPEI_2014 <- values[[5]]
+spei_2010_2020$SPEI_2015 <- values[[6]]
+spei_2010_2020$SPEI_2016 <- values[[7]]
+spei_2010_2020$SPEI_2017 <- values[[8]]
+spei_2010_2020$SPEI_2018 <- values[[9]]
+spei_2010_2020$SPEI_2019 <- values[[10]]
+spei_2010_2020$SPEI_2020 <- values[[11]]
+
+
+# Rename rows
+rownames(spei_2010_2020) <- 1:nrow(spei_2010_2020)
+
+# Move longitude and latitude to the front
+spei_2010_2020 <- spei_2010_2020 %>% 
+  relocate(lat)
+
+spei_2010_2020 <- spei_2010_2020 %>% 
+  relocate(lon)
+
+# Remove grid cells with NA values
+spei_2010_2020 <- spei_2010_2020[!is.na(spei_2010_2020$SPEI_2010),]
+
+# Make row names nices
+rownames(spei_2010_2020) <- 1:nrow(spei_2010_2020)
+
+# Export this as a csv file
+write.csv(spei_2010_2020, "SPEI_2010_20_BGD.csv")
+```
+
+
+## Visualise the data a little to make sure it works ##
+
+Take SPEI values for 2010.
+
+```{r}
+
+# Test for 2010
+spei_2010 <- spei_2010_2020[,1:3]
+
+# Turn values from 2010 into a raster
+r_drought <- rasterFromXYZ(spei_2010)
+plot(r_drought) # quick check that raster is populated with values
+
+# Define colour palette for the map - red indicates lower values of SPEI and yellow higher values. 
+pal1 <- colorNumeric(c("#B10026", "#E31A1C", "#FFFFCC", "#FC4E2A", "#FD8D3C", "#FEB24C", "#FED976", "#FFEDA0"), values(r_drought),
+  na.color = "transparent")
+
+# Assign a CRS to the raster
+crs(r_drought) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0" 
+
+# Create an interacive map showing SPEI values for 2010 
+map5 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(r_drought, colors = pal1, opacity=0.7, project = FALSE)%>%
+  addLegend(pal = pal1, values = values(r_drought), title = "SPEI") 
+
+map5
+```
+

@@ -83,7 +83,7 @@ acled_geo <- st_join(acled_data_sf, bgd_admin4)
 # Turn the spatial points data frame into a regular data frame 
 acled_geo <- as.data.frame(acled_geo)
 
-# Export as csv file 
+# Export as csv file - this csv file matches conflict events from ACLED with administrative level 4 codes from the shapefile from OCHA
 write.csv(acled_geo, "ACLED_geo.csv")
 ```
 
@@ -102,13 +102,16 @@ acled_geo1 <- acled_geo[ , !names(acled_geo) %in%
     c("ADM4_REF","ADM4ALT1EN", "ADM4ALT2EN")]
 
 # Rename the code identifiers for administrative levels - remove BD
-acled_geo1[, c(33, 35, 37, 39)] <- substr(acled_geo1$ADM4_PCODE, 3, 10)
+acled_geo1$ADM4_PCODE <- substr(acled_geo1$ADM4_PCODE, 3, 10)
+acled_geo1$ADM3_PCODE <- substr(acled_geo1$ADM3_PCODE, 3, 10)
+acled_geo1$ADM2_PCODE <- substr(acled_geo1$ADM2_PCODE, 3, 10)
+acled_geo1$ADM1_PCODE <- substr(acled_geo1$ADM1_PCODE, 3, 10)
 
 # Check that codes for admin 1 (division) follow the same conventions
-unique(acled_geo1$ADM1_PCODE)
-unique(BIHS_admin$dvcode)
+head(acled_geo1$ADM1_PCODE)
+head(BIHS_admin$dvcode)
 
-# Yep, all good 
+# Yes - they follow two-digit convention
 
 # Remove the first 2 digits from the union code (those refer to admin level 1)
 acled_geo1$ADM4_PCODE <- substr(acled_geo1$ADM4_PCODE, 3, 10)
@@ -128,8 +131,10 @@ names(BIHS_admin)[names(BIHS_admin) == "uncode"] <- "ADM4_PCODE"
 acled_geo1$ADM4_PCODE <- as.character(acled_geo1$ADM4_PCODE)
 BIHS_admin$ADM4_PCODE <- as.character(BIHS_admin$ADM4_PCODE)
 
-# Left join - just to see how many observations overlap.
+# Left join - this data will assing all conflict events to the unions in which BIHS households are located
 BIHS_2 <- left_join(BIHS_admin, acled_geo1)
+
+# Note that some unions did not have a any conflict events, while others had multiple conflict events. 
 
 # Have a look at unique values of admin 4 in both data frames
 acled_p4 <- unique(acled_geo1$ADM4_PCODE)
