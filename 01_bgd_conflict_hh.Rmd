@@ -1,0 +1,148 @@
+---
+title: "Conflict and household data in Banlgadesh"
+output: html_document
+date: "2024-11-12"
+---
+
+```{r libraries, include=FALSE}
+library("plyr")                     # Load plyr package
+library("dplyr")                    # Manipulate data
+library("haven")                    # Load dta files
+library("sf")                       # Spatial features
+library("raster")                   # Raster data (but also shapefiles)
+```
+
+
+## 1. MATCH ACLED DATA WITH A BGD SHAPEFILE AND BIHS ADMIN CODES ##
+
+## Load administrative divisions of households from BIHS ##
+
+Note: BIHS does not have GPS coordinates of households, but offers codes for the following administrative levels: division, district, upazila, and union (rural councils).
+
+I will match conflict data from ACLED to the lowest administrative level 4 in rural Bangladesh (unions). 
+
+```{r bihs}
+# Set directory
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/BIHS data")
+
+# Import data file with administrative codes in Bangladesh
+BIHS_admin <- read_dta("BIHSlocations.dta")
+
+```
+
+##  Load shapefile for Bangladesh ##
+
+Subnational boundaries at adminsitrative level 4 (unions) coming from https://data.humdata.org/dataset/cod-ab-bgd
+
+```{r bgd shapefile admin 4}
+# Set working directory 
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Administrative boundary shapefiles/bgd_adm_bbs_20201113_shp/bgd_adm_bbs_20201113_SHP")
+
+# Load the shapefile
+bgd_admin4 <- read_sf("bgd_admbnda_adm4_bbs_20201113.shp")
+
+```
+
+## Load ACLED data on conflict ##
+
+Import the excel spreadsheet with conflict data from ACLED. Then match the geographical coordinates of each conflict event to the union from the Bangladesh shapefile 
+
+Each conflict event is geo-located with longitude and latitude
+
+```{r acled}
+# Set working directory
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/ACLED")
+
+# Import the ACLED data 
+acled_data <- read.csv("Bangladesh_ACLED.csv")
+
+# Move longitude before latitude
+acled_data <- acled_data %>% relocate(latitude, .after = longitude)
+
+# Turn ACLED data frame into spatial points data frame
+acled_data_sf <- st_as_sf(acled_data, coords = c(23:24))
+
+
+```
+
+## Spatial join between ACLED data and administrative level 4 in Bangladesh ##
+
+```{r spatial join acled admin data}
+# Set projection as the same for both objects - using the World Geodetic System 1984 CRS
+st_crs(acled_data_sf) = 4326
+st_crs(bgd_admin4) = 4326
+
+# Have a look at the spatial objects
+acled_data_sf
+bgd_admin4
+
+# Perform a spatial join between a spatial features data frame with ACLED data and Bangladesh shapefile. This function will check whether each spatial point (geographical coordinates) falls inside each polygon and return a data frame with successfully matched information from both spatial objects.
+
+acled_geo <- st_join(acled_data_sf, bgd_admin4)
+
+# Turn the spatial points data frame into a regular data frame 
+acled_geo <- as.data.frame(acled_geo)
+
+# Export as csv file 
+write.csv(acled_geo, "ACLED_geo.csv")
+```
+
+
+# Match geo-referenced data from ACLED with BIHS ##
+
+In the BIHS data, the admin 4 code has between 5-6 digits. Admin 4 code is a combination of codes for administrative levels 1, 2, 3 that need to be broken down to ensure compatibility. 
+
+The format that I will save admin 4 codes in will follow from BIHS: 5-6 digits.
+
+```{r}
+# Create a new data frame with compatible codes
+# Remove unnecessary columns
+
+acled_geo1 <- acled_geo[ , !names(acled_geo) %in% 
+    c("ADM4_REF","ADM4ALT1EN", "ADM4ALT2EN")]
+
+# Rename the code identifiers for administrative levels - remove BD
+acled_geo1[, c(33, 35, 37, 39)] <- substr(acled_geo1$ADM4_PCODE, 3, 10)
+
+# Check that codes for admin 1 (division) follow the same conventions
+unique(acled_geo1$ADM1_PCODE)
+unique(BIHS_admin$dvcode)
+
+# Yep, all good 
+
+# Remove the first 2 digits from the union code (those refer to admin level 1)
+acled_geo1$ADM4_PCODE <- substr(acled_geo1$ADM4_PCODE, 3, 10)
+
+# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
+
+# Change to numeric - this will drop 0 at the front 
+acled_geo1$ADM4_PCODE <- as.numeric(acled_geo1$ADM4_PCODE)
+
+# Back to character 
+acled_geo1$ADM4_PCODE <- as.character(acled_geo1$ADM4_PCODE)
+
+# Rename columns in BIHS_admin before the join 
+names(BIHS_admin)[names(BIHS_admin) == "uncode"] <- "ADM4_PCODE"
+
+# Back to character for compatibility of the merge
+acled_geo1$ADM4_PCODE <- as.character(acled_geo1$ADM4_PCODE)
+BIHS_admin$ADM4_PCODE <- as.character(BIHS_admin$ADM4_PCODE)
+
+# Left join - just to see how many observations overlap.
+BIHS_2 <- left_join(BIHS_admin, acled_geo1)
+
+# Have a look at unique values of admin 4 in both data frames
+acled_p4 <- unique(acled_geo1$ADM4_PCODE)
+BIHS_p4 <- unique(BIHS_admin$ADM4_PCODE)
+
+# ACLED data covers 1358 unique unions while BIHS covers 275 unique unions
+
+# Remove ugly columns
+acled_geo1 <- acled_geo1[ , !names(acled_geo1) %in% 
+    c("date","validTo", "validOn")]
+
+# Export ACLED data as a csv file where the "ADM4_PCODE" column corresponds to the "uncode" column from the BIHS data. 
+write.csv(acled_geo1, "ACLED_geo1.csv")
+
+
+```
