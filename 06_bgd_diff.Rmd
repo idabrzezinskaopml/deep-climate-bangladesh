@@ -39,28 +39,27 @@ BPanel_reg <- read_dta('BPanel_short.dta')
 
 ```
 
-# Import centroids of union #
+# Find centroids of unions #
 
-There is already an excel file which has BIHS union centroids that can be matched to the union code
 
 ```{r}
-# Set working directory for this chunk
-setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Code")
+# Import shapefile for administrative level 4 
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Administrative boundary shapefiles/bgd_adm_bbs_20201113_shp/bgd_adm_bbs_20201113_SHP")
 
-# Import excel 
-BIHS_lonlat <- read_csv("BIHS_lonlat.csv")
+# The below version will import the shapefile 
+bgd_admin4 <- read_sf("bgd_admbnda_adm4_bbs_20201113.shp")
 
-# Keep only necessary columns
-BIHS_lonlat <- BIHS_lonlat[, c("uncode", "longitude", "latitude")]
+# Find the cenroid of the union
+centroid_df <- st_centroid(bgd_admin4)
 
-# Merge the two data frames 
-BPanel_reg <- left_join(BPanel_reg, BIHS_lonlat)
+# Leave only identifier for admin 4
+centroid_df <- centroid_df[, c("ADM4_PCODE", "ADM4_EN", "geometry")]
 
-# Check for missing values
-summary(BPanel_reg$longitude)
-summary(BPanel_reg$latitude)
+```
 
-# No missing values
+
+```{r}
+
 ```
 
 
