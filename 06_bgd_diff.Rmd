@@ -1,13 +1,8 @@
 ---
-title: "DEEP Nigeria crises spatial differencing"
+title: "Spatially differencing key outcome variables Bangladesh"
 output: html_document
-date: '2022-12-07'
+date: "2024-11-14"
 ---
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
 ## Load relevant packages ##
 ---
 ```{r Load R libraries, include=FALSE}
@@ -15,15 +10,8 @@ library("plyr")                     # Load plyr package
 library("dplyr")                   # Load dplyr package
 library("readr")                    # Load readr package
 library("tidyr")                    # Data manipulation
-library("rgdal")                    # package for geospatial analysis
-library("ggplot2")                  # package for plotting
 library("stargazer")                # For LaTeX tables
 library("AER")                      # Robust standard errors
-library("rworldmap")                # Mapping country boundaries
-library("leaflet")                  # Fancy interactive maps
-library("chron")                    # Manipulating the time variable in a netCDF file
-library("lattice")                  # netCDF files
-library("RColorBrewer")             # net CDF files
 library("reshape2")                 # reshape long
 library("haven")                    # Load dta files
 library("foreign")                  # Export dta files
@@ -34,11 +22,11 @@ library("plm")                      # For panel data and first difference
 ```
 
 
-# Import .dta - strongly balanced BIHS panel for years 2011, 2015, 2019 with climatic and conflict variables merged in ##
+# Import .dta - strongly balanced BIHS panel for years 2011, 2015, 2019 with climatic and conflict variables merged in #
 
 Notes from Vidya on which variables to use for differencing:
 
-FYI here are the variables I used in the main multinomial logistic regression: qui mlogit pov4 i.fatalitiesany1119 i.drought_any111915 i.floods_any1119 hhsize hhage hhage2 hhfemale i.relig hhedupri hhemp_agri nfe logAV lsT remitany i.region [pw=hhweight], vce(cluster cluster) base(3)
+Variables used in the main multinomial logistic regression: qui mlogit pov4 i.fatalitiesany1119 i.drought_any111915 i.floods_any1119 hhsize hhage hhage2 hhfemale i.relig hhedupri hhemp_agri nfe logAV lsT remitany i.region [pw=hhweight], vce(cluster cluster) base(3)
 
 
 ```{r import BIHS panel}
@@ -49,8 +37,6 @@ setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict 
 
 BPanel_reg <- read_dta('BPanel_short.dta')
 
-# Clear all
-#rm(list = ls())
 ```
 
 # Import centroids of union #
@@ -343,4 +329,3 @@ stargazer(model23, model24, model25,
 ```{r save rdata}
 save.image(file="1.RData") 
 ```
-

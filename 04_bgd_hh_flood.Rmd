@@ -1,0 +1,208 @@
+---
+title: "Spatially join flood and household data"
+output: html_document
+date: "2024-11-14"
+---
+```{r libraries}
+library("plyr")                     # Load plyr package
+library("dplyr")                    # Data manipulation
+library("readr")                    # Load and export csv files
+library("raster")                   # Raster data
+library("haven")                    # Load dta files
+library("foreign")                  # Export dta files
+library("sf")                       # Spatial features
+library("exactextractr")            # Zonal statistics using geo-spatial data
+library("tidyverse")                # Data manipulation
+```
+
+
+##  Import multiple flood events ##
+
+All flood events from Bangladesh between 2010-2018 from the Global Flood Database at https://global-flood-database.cloudtostreet.ai/ 
+
+Load all the TIF files as rasters. Extract information using string operators to identify the full date of the flood event. 
+
+```{r pressure, echo=FALSE}
+# Set the working directory to TIF files
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Global Flood Database")
+
+# Create a list of TIF files using the DFO pattern and save as rasters
+DFO_files <- list.files(pattern = "*DFO",
+                           full.names = TRUE) %>%
+  lapply(raster)
+
+# Check names in the first raster from the list of DFO files
+DFO_files[[1]]@file@name
+
+# Extract full date of the flood event
+fulldate <- substr(DFO_files[[1]]@file@name, 134, 141)
+fulldate
+
+```
+
+##  Load shapefile for Bangladesh ##
+
+Subnational boundaries at adminsitrative level 4 (unions) coming from https://data.humdata.org/dataset/cod-ab-bgd
+
+```{r}
+# Set working directory 
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Administrative boundary shapefiles/bgd_adm_bbs_20201113_shp/bgd_adm_bbs_20201113_SHP")
+
+# The below version will import the shapefile in a "Spatial Polygons Data Frame" format, which is easier for spatial joins
+bgd_admin4 <- read_sf("bgd_admbnda_adm4_bbs_20201113.shp")
+
+```
+
+# Extract the max value of the flood in each union - this means that if any of the grid cells falling within each union is flooded, the union will be classified as flooded 
+
+Name binary variable for flood according to the flood event, e.g. f_20100327 is a binary variable indicating whether a union (and thus households residing within that union) was flooded in a flood event on 27/03/2010
+
+```{r identify flooded unions}
+# Create an empty list for data frames with flooded unions
+union_list <- list()
+
+# Get number of rasters
+num_rasters <- 1:length(DFO_files)
+
+for (i in num_rasters) {
+union_list[[i]] <- exact_extract(DFO_files[[i]], bgd_admin4, fun = c('max'), append_cols=c("ADM4_PCODE", "ADM4_EN")) 
+fulldate <- substr(DFO_files[[i]]@file@name, 134, 141)  # store full date of flood event
+names(union_list[[i]])[names(union_list[[i]]) == 'max'] <- paste("f", fulldate, sep="_") # name binary variable for flood f_YYYYMMDD
+}
+
+# Join data frames 
+bgd_flood <- union_list %>% reduce(left_join, by = c("ADM4_PCODE", "ADM4_EN"))
+
+# Replace NAs with 0s
+bgd_flood[,3:41][is.na(bgd_flood[,3:41])] <- 0 
+
+# Rename columns where two flood events occurred on the same day - strip .x from the variable name and replace .y with _2
+names(bgd_flood) <- sub(".x", "", names(bgd_flood))
+names(bgd_flood) <- sub(".y", "_2", names(bgd_flood))
+
+# Have a look - union flood exposure between 0-40% depending on flood event
+summary(bgd_flood)
+
+```
+
+# Import BIHS data for matching by the union code  #
+
+```{r import BIHS}
+# Set directory
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/BIHS data")
+
+# Import data file with administrative codes in Bangladesh
+BIHS_admin <- read_dta("BIHSlocations.dta")
+
+```
+
+# Rename the union variable to match the codes in BIHS ##
+
+The Bangladesh shapefile has a slightly different naming convention for administrative level 4 (union)
+
+
+```{r}
+# Create a new data frame with compatible codes
+
+# Rename the code identifiers for administrative levels - remove BD
+bgd_flood$ADM4_PCODE <- substr(bgd_flood$ADM4_PCODE, 3, 10)
+
+# Remove the first 2 digits from the union code (those refer to admin level 1)
+bgd_flood$ADM4_PCODE <- substr(bgd_flood$ADM4_PCODE, 3, 10)
+
+# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
+
+# Change to numeric - this will drop 0 at the front 
+bgd_flood$ADM4_PCODE <- as.numeric(bgd_flood$ADM4_PCODE)
+
+# Back to character 
+bgd_flood$ADM4_PCODE <- as.character(bgd_flood$ADM4_PCODE)
+
+# Rename columns in BIHS_admin before the join 
+names(BIHS_admin)[names(BIHS_admin) == "uncode"] <- "ADM4_PCODE"
+
+# Back to character for compatibility of the merge
+bgd_flood$ADM4_PCODE <- as.character(bgd_flood$ADM4_PCODE)
+bgd_flood$ADM4_PCODE <- as.character(bgd_flood$ADM4_PCODE)
+
+```
+
+
+## Inspect the union codes that did not match manually, then join dataframes ##
+
+For all 14 cases, look at the Stata dta file with BIHS locations that also has labels with names in English. On that basis, find the corresponding ADM4_PCODE in the shapefile, which is different.
+
+1. BIHS code: 193617, BIHS name: Bitikandi, Shapefile ADM4_PCODE: 199417
+2. BIHS code: 198104, BIHS name: Akubpur, Shapefile ADM4_PCODE: 198110
+3. BIHS code: 338609, BIHS name: Barmi, Shapefile ADM4_PCODE: 338621
+4. BIHS code: 354306, BIHS name: Bethuri, Shapefile ADM4_PCODE: 354311
+5. BIHS code: 827395, BIHS name: Saorail, Shapefile ADM4_PCODE: 824795
+6. BIHS code: 935780, BIHS name: Musuddi, Shapefile ADM4_PCODE: 932580
+7. BIHS code: 102056, BIHS name: Majhira , Shapefile ADM4_PCODE: 108556
+8. BIHS code: 105409, BIHS name: Bir Kedar, Shapefile ADM4_PCODE: 105413
+9. BIHS code: 386109, BIHS name: Alampur, Shapefile ADM4_PCODE: 386115
+10. BIHS code: 696312, BIHS name: Bara Harishpur, Shapefile ADM4_PCODE: 696320
+11. BIHS code: 496106, BIHS name: Ballabher Khas, Shapefile ADM4_PCODE: 496111
+12. BIHS code: 855816, BIHS name: Bara Hazratpur, Shapefile ADM4_PCODE: 855826
+13. BIHS code: 857309, BIHS name: Annadanagar, Shapefile ADM4_PCODE: 857317
+14. BIHS code: 857650, BIHS name:  Madankhali, Shapefile ADM4_PCODE: 857656
+
+```{r uncodes}
+# Create another data frame with values from the Bangladesh shapefile to replace with new matching codes. Here I replace shapefile codes with codes from BIHS.
+flood_bgd_newcodes <- bgd_flood
+
+# Now replace admin 4 codes
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="199417"] <- "193617"  #1
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="198110"] <- "198104"  #2
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="338621"] <- "338609"  #3
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="354311"] <- "354306"  #4
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="824795"] <- "827395"  #5 
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="932580"] <- "935780"  #6
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="108556"] <- "102056"  #7
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="105413"] <- "105409"  #8
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="386115"] <- "386109"  #9
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="696320"] <- "696312"  #10
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="496111"] <- "496106"  #11
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="855826"] <- "855816"  #12
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="857317"] <- "857309"  #13
+flood_bgd_newcodes$ADM4_PCODE[flood_bgd_newcodes$ADM4_PCODE=="857656"] <- "857650"  #14
+
+# Make sure that admin codes are saved as character
+BIHS_admin$ADM4_PCODE <- as.character(BIHS_admin$ADM4_PCODE)
+
+# Left join - jsut to see how many observations oberlap.
+BIHS_flood <- left_join(BIHS_admin, flood_bgd_newcodes)
+
+# Export BIHS data matched with flood data a csv file where the "ADM4_PCODE" column corresponds to the "uncode" column from the BIHS data. 
+write.csv(BIHS_flood, "BIHS_flood.csv")
+
+# Check for missing values - no NAs :)
+summary(BIHS_flood)
+```
+
+# Comvine flood and drought data into one data frame #
+
+```{r BIHS drought and flood}
+# Import the BIHS drought file
+# Set working directory
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Code")
+
+# Import the drought data 
+BIHS_drought <- read.csv("BIHS_drought.csv")
+
+# Turn admin codes into characters 
+BIHS_drought$ADM4_PCODE <- as.character(BIHS_drought$ADM4_PCODE)
+
+# Combine into a single file
+BIHS_climate <- left_join(BIHS_flood, BIHS_drought)
+
+# Check for missing values - no NAs :)
+summary(BIHS_climate)
+
+# Remove the "X" column 
+BIHS_climate <- BIHS_climate[ , !names(BIHS_climate) %in% 
+    c("X")]
+
+# Export final climate dataset
+write.csv(BIHS_climate, "BIHS_climate.csv")
+```

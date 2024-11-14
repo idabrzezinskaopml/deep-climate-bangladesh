@@ -1,0 +1,345 @@
+---
+title: "Climate visualisation Bangladesh"
+output: html_document
+date: "2024-11-14"
+---
+
+```{r library}
+library("plyr")                     # Load plyr package
+library("dplyr")                    # Data manipulation
+library("readr")                    # Load and export csv files
+library("raster")                   # Raster data
+library("sf")                       # Spatial features
+library("tidyverse")                # Data manipulation
+library("leaflet")                  # Interactive maps
+library("htmlwidgets")              # HTML widgets
+library("RColorBrewer")             # Nice colours
+library("ggplot2")                  # package for plotting
+library("exactextractr")            # Zonal statistics using geo-spatial data
+library("reshape")                  # Melt long
+library("scales")                   # Nice scales in graphs
+```
+
+
+## Visualise floods ##
+
+Turn layers of each flood event in Bangladesh between 2010-2018 into a mosaic, i.e. layer all floods on top of each other. Map all flooded areas in Bangladesh between 2010-2018
+
+```{r flood vis}
+# Import base raster layer for Bangladesh from WorldPop - this details the boundaires of the country 
+base.layer <- raster('C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Base raster/bgd_level0_100m_2000_2020.tif')
+
+# Set the working directory to TIF files
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Global Flood Database")
+
+# Create a list of TIF files using the DFO pattern and save as rasters
+DFO_files <- list.files(pattern = "*DFO",
+                           full.names = TRUE) %>%
+  lapply(raster)
+
+# Extract only the layer we are interested in (flooded) - for all these files. Replace all elements in the list 
+for (i in 1:39) {
+ DFO_files[[i]] <- subset(DFO_files[[i]], "flooded")
+  
+}
+
+# Set extent of each raster layer to that of the base layer - this will give the max and min coordinates that bound Bangladesh
+
+for (i in 1:39) {
+DFO_files[[i]] <- crop(DFO_files[[i]], base.layer)  
+
+}
+
+# Create an initial mosaic with the first two rasters
+megaraster <- mosaic(DFO_files[[1]], DFO_files[[2]], fun="max")
+
+# Turn into a mosaic 
+for (i in 3:39) {
+
+megaraster <- mosaic(megaraster, DFO_files[[i]], fun="max")
+
+}
+
+
+# Mask to get only the shape of Bangladesh
+
+# Need the same spatial resolution and extent between the base raster layer and flood layers
+base.layer <- resample(base.layer, megaraster, method = "ngb") # resampling nase raster to the spatial resolution of the flood layers
+megaraster <- crop(megaraster, base.layer) # setting extent of flood layer same as base layer
+megaraster <- mask(x = megaraster, mask = base.layer) # masking to the shape of Bangladesh from the base layer 
+
+# Reclassify 0s to missing values so they are not displayed on the map
+y <- reclassify(megaraster, cbind(-Inf, 0, NA))
+
+# Check that there are no missings
+summary(y)
+
+# Quick preview
+plot(y, axes=F, box=F, legend=F)
+
+# Create an interactive map
+# Set colour palette 
+pal <- colorNumeric(c("#FFFFCC", "#0C2C84" ,"#41B6C4"), values(y),
+  na.color = "transparent")
+
+map2 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(y, colors = pal) %>%
+  addLegend(pal = pal, values = values(y),
+    title = "Floods")
+
+map2
+
+# Save map as widget
+saveWidget(map2, file="BGD_floods.html")
+
+```
+
+## Add droughts to the visualisation ##
+
+Map the worst drought in Bangladesh between 2010-2020
+
+```{r vis drought}
+# Import the data frame with SPEI values
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Code")
+
+# Make a data frame with just geographical coordinates, regular 0.5 degrees grid and SPEI values 
+drought_201020 <- read.csv("SPEI_2010_20_BGD.csv")
+
+# Add a column that has the lowest value of SPEI between 2010-2020
+drought_201020$minSPEI <- apply(drought_201020[,4:14],1,min)
+
+# Replace all values above -1.5 with NA (we are only interested in drought defined as SPEI<-1.5)
+drought_201020$minSPEI[drought_201020$minSPEI > -1.5] <- NA
+
+# Let's also have a version for SPEI<0
+drought_201020$minSPEIzero <- apply(drought_201020[,4:14],1,min)
+
+# Replace all values above 0 with NA (we are only interested in drought defined as SPEI<0)
+drought_201020$minSPEIzero[drought_201020$minSPEI > 0] <- NA
+
+# Create a data frame with just the variable of interest and grid coordinates 
+
+ex_drought <- drought_201020[, c("lon", "lat", "minSPEI")]
+spei_zero_drought <- drought_201020[, c("lon", "lat", "minSPEIzero")]
+
+# Remove missing values
+ex_drought <- ex_drought[complete.cases(ex_drought), ]
+spei_zero_drought <- spei_zero_drought[complete.cases(spei_zero_drought), ]
+
+# Create raster
+r_drought <- rasterFromXYZ(ex_drought)
+r_drought_zero <- rasterFromXYZ(spei_zero_drought)
+
+# Mask to the shape of Bangladesh
+r_drought <- crop(r_drought, base.layer)  # set extent the same as base layer
+base.layer <- resample(base.layer, r_drought, method = "ngb") # resample base layer to the same spatial resolution as drought raster (0.5 degrees)
+r_drought <- mask(x = r_drought, base.layer) # mask to get just the shape of Bangladesh
+
+# Simple plot to see how the raster came out
+
+plot(r_drought, axes=F, box=F)
+
+# Tag a coordinate system
+crs(r_drought) <- sp::CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+crs(r_drought_zero)  <- sp::CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+
+# Check colour palettes - want something red
+display.brewer.pal(n = 8, name = 'YlOrRd')
+
+# Hexadecimal color specification 
+brewer.pal(n = 8, name = "YlOrRd")
+
+# Set colour palette 
+pal1 <- colorNumeric(c("#B10026", "#E31A1C", "#FFFFCC", "#FC4E2A", "#FD8D3C", "#FEB24C", "#FED976", "#FFEDA0"), values(r_drought),
+  na.color = "transparent")
+
+pal2 <- colorNumeric(c("#E31A1C", "#FFFFCC", "#FC4E2A", "#FD8D3C", "#FEB24C", "#FED976", "#FFEDA0"), values(r_drought_zero),
+  na.color = "transparent")
+
+
+# Now put it onto leaflet 
+map3 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(r_drought,  colors = pal1, project=FALSE)%>%
+   addLegend(pal = pal1, values = values(r_drought), title = "SPEI")
+
+map3
+
+```
+
+## Combine visualisations of flood and drought in Bangladesh ##
+
+
+```{r}
+# Create a colour pallete for drought values
+pal3 <- colorNumeric(c("#E31A1C", "#FFFFCC", "#FC4E2A", "#FD8D3C", "#FEB24C", "#FED976", "#FFEDA0"), values(r_drought),
+  na.color = "transparent")
+
+# Make sure raster image with drought has the same CRS as floods
+crs_flood <- crs(y)
+crs(r_drought) <- crs_flood
+
+map5 <- leaflet() %>%
+ addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(r_drought,  colors = pal3, opacity=0.7, project = FALSE)%>%
+  addLegend(pal = pal3, values = values(r_drought), title = "SPEI") %>%
+  addRasterImage(y, colors = pal) 
+
+map5
+
+# Save map as widget
+saveWidget(map5, file="BGD_climate_map.html")
+```
+
+
+# Make graphs with trends in droughts and floods over time #
+
+For floods, we can simply count the number of flood events occuring each year. For drought, I will show the number of districts (there are 64 districts in Bangladesh in total) affected by drought each year. District is administrative level 2
+
+New approach (Vidya's idea): for each year and each state, find the minimum value of SPEI and assign it to one of the 4 categories below so that we get non-overlapping categories in the stacked area graph.
+
+These are the 4 categories of drought:
+1.  'SPEI < -1.5'
+2. '-1.5 < SPEI < -1'
+3.  '-1 < SPEI < -0.5'
+4. "-0.5 < SPEI < 0"
+
+```{r}
+# Import shapefile with administrative level 2 (district)
+bgd_adm2 <- read_sf("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Administrative boundary shapefiles/bgd_adm_bbs_20201113_shp/bgd_adm_bbs_20201113_SHP/bgd_admbnda_adm2_bbs_20201113.shp")
+
+# Remove first column with "X"
+drought_201020 <- drought_201020[,2:16]
+
+# Turn annual drought values into raster 
+raster_spei <- rasterFromXYZ(drought_201020)
+
+# Make sure the CRS is consistent with shapefile
+crs(raster_spei) <- "+proj=longlat +datum=WGS84 +no_defs"
+
+# Calculate zonal statistics for each district 
+bgd_spei_adm2 <- exact_extract(raster_spei, bgd_adm2, fun = c('mean'), append_cols=c("ADM2_PCODE", "ADM2_EN"))
+
+# Remove "mean" from column names
+names(bgd_spei_adm2) <- sub("^mean.", "", names(bgd_spei_adm2))
+
+# Remove min SPEI value - we need a time series for 2010-2020
+bgd_spei_adm2 <- bgd_spei_adm2[ , !names(bgd_spei_adm2) %in% 
+    c("minSPEI","minSPEIzero")]
+
+# Reshape long
+long.drought <- melt(data.frame(bgd_spei_adm2), id.vars = c("ADM2_PCODE", "ADM2_EN"), variable.name = "year")
+
+# Remove "SPEI" from the year values
+long.drought$variable <- substr(long.drought$variable, 6, 10)
+
+# Rename column as year
+names(long.drought)[names(long.drought) == 'variable'] <- "year"
+
+# Rename column to indicate SPEI values
+names(long.drought)[names(long.drought) == 'value'] <- "SPEI"
+
+# Create a variable assigning categories of drought
+long.drought <- long.drought %>% mutate(Drought =
+                     case_when(SPEI < -1.5 ~ "1", 
+                               SPEI < -1 & SPEI > -1.5 ~ "2",
+                               SPEI < -0.5 & SPEI > -1 ~ "3",
+                               SPEI< 0 & SPEI > -0.5 ~ "4",
+                               )
+)
+
+# Remove NA values
+long.drought <-subset(long.drought, Drought!="NA")
+
+# Count the number of states in each category of drought each year  
+results2 <- long.drought %>%
+  group_by(Drought, year) %>%
+  summarize(count = n_distinct(ADM2_EN))
+
+# Order by year and drought
+results2 <- results2[order(results2$year, results2$Drought),]
+
+# Expand a data frame to cover all categories of drought and all years 
+g <- with(results2, expand.grid(year = seq(min(year), max(year)), Drought = unique(Drought), count = 0)) #
+
+# Reorder the data frame
+g <- g[order(g$year, g$Drought),]
+
+# Change column name
+colnames(results2)[3] <- "number"
+
+# Turn years into numeric
+g$year <- as.numeric(g$year)
+results2$year <- as.numeric(results2$year)
+
+
+# Left join - need for the results data frame to override the other one 
+test <- left_join(g, results2)
+
+# Replace values of count with number if number is non-missing
+test$number <-replace(test$number, is.na(test$number), test$count)
+
+# Drop the count column 
+test = subset(test, select = -count )
+
+# Rename codes
+test$Drought[test$Drought == '1'] <- 'SPEI < -1.5'
+test$Drought[test$Drought == '2'] <- '-1.5 < SPEI < -1'
+test$Drought[test$Drought == '3'] <- '-1 < SPEI < -0.5'
+test$Drought[test$Drought == '4'] <- "-0.5 < SPEI < 0"
+
+# Give a specific order:
+test$Drought <- factor(test$Drought , levels=c('SPEI < -1.5', '-1.5 < SPEI < -1', '-1 < SPEI < -0.5', "-0.5 < SPEI < 0") )
+
+
+# Plot
+ggplot(test, aes(x=year, y=number, fill=Drought)) + 
+    geom_area()+ 
+scale_x_continuous(breaks= pretty_breaks())+ theme_minimal() + scale_fill_brewer(palette="Blues")+
+  xlab("Year") + ylab("Number of districts") + ggtitle("Number of districts affected by drought in Bangladesh in the period 2010-2020")
+
+# Check with values from the drought data frame
+summary(drought_201020)
+
+
+```
+
+Create a graph for number of floods per year during 2010-2018
+
+```{r}
+# Import csv file with flood data 
+bihs_flood <- read.csv("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Output/BIHS_flood.csv")
+
+# Save column names from the flood data frame - those already contain the dates of the flood events
+flood.dates <- colnames(bihs_flood[,7:45])
+
+# Leave only the year of the flood
+flood.dates <- substr(flood.dates, 3, 6) # remove day and month
+
+# Turn into a table
+flood.table <- table(flood.dates)
+flood.table
+
+# Turn into a data frame
+flood.ts <- as.data.frame(flood.table)
+
+# Drop levels
+flood.ts$flood.dates <- levels(droplevels(flood.ts$flood.dates))
+
+# Change to numeric
+flood.ts$flood.dates <- as.numeric(flood.ts$flood.dates)
+flood.ts$Freq <- as.numeric(flood.ts$Freq)
+
+# Plot
+ggplot(flood.ts, aes(x=flood.dates, y=Freq, fill="Blue", legend=F)) + 
+    geom_area()+ 
+scale_x_continuous(breaks= pretty_breaks())+ 
+scale_y_continuous(breaks= pretty_breaks()) + 
+  theme_minimal() + scale_fill_brewer(palette="Blues")+
+  xlab("Year") + ylab("Number of floods") + ggtitle("Number of floods in Bangladesh in the period 2010-2018")
+
+
+```
+
+

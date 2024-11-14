@@ -275,12 +275,6 @@ rm(pet.array, pet_vec)
 # Replace missing values with the usual "NA"
 pre.array[pre.array == fillvalue$value] <- NA
 
-# Note: the array looks like it has loads of missing values. Check?
-head(pre.array)
-
-# Clear all
-#rm(list = ls())
-
 # Close the netCDF file
 nc_close(pre_data)
 ```
@@ -359,11 +353,7 @@ SPEI package parameters:
 2) Distribution parameter decides what kind of distribution the data should be fit to. For some reason, log-logistic returns all values while Gamma comes up with NA. I will use log-logistic below.
 3) Reference period: default will be taking into account the whole reference period of the data. In my case that is 1981-2020.
 
-Note: do we want drought measured on different time scales? 1,2,3,4,5 year cumulative drought? 
-
-Brunckhorst (2020) uses a 12-month SPI. Take the value of December for each year.
-
-Calculate 12-month Dec SPEI for all years 2010-2020. In order not to spend 3 years on this, it would be useful to have a loop that goes through these individual years, calcultes SPEI and saves the result as a column in a data frame with lon-lat and X-Y combinations 
+Calculate 12-month Dec SPEI for all years 2010-2020.
 
 ```{r turn water balance into ts}
 # First we need to turn the water balance data frame into a time series 

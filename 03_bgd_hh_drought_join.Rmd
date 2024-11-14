@@ -3,70 +3,52 @@ title: "Match household and drought data"
 output: html_document
 date: "2024-11-12"
 ---
-TO-DO: Use zonal statistics function
 
-Note: the SPEI data is quite aggregated and multiple unions will likely fall within one grid cell. However, the issue is that when I perform a spatial join only one match is found.Make sure that all BIHS locations can be matched with a SPEI value. 
+```{r libraries}
+library("haven")
+library("sf")                       # Spatial features
+library("raster")                   # Raster data (but also shapefiles)
+library("dplyr")
+library("exactextractr")            # Zonal statistics using geo-spatial data
+```
 
-Okay, this doesn't really work --> I think the over function takes the centroid of my coordinate points rather than the entire area covered by the grid cell. I can fix this by converting my coordinate points to polygons then trying to find overlap in areas between polygons.
-
-New idea: Use the disaggregate command! It will create more data points at a higher spatial resolution (even though the actual values are all the same). This helps for the purposes of a spatial join though. The issue atm is that the 47 grid cells do not actually cover the entiretly of Bangladesh:( You can also play around with different spatial resolutions of the disaggregation 
+SPEI data is on a regular 0.5 degress grid (around 50km x 50km at the equator). This means some grid cells are likely to cross the boundaries of unions (administrative level 4). I will use the exactextract package to calculate the mean value of SPEI for each union, based on a raster of SPEI values and a shapefile with boundaries of administrative level 4.
 
 ## Match SPEI with BIHS ##
 
 ```{r}
-# Make a new data frame
-spei_geo <- spei_2010_2020
+# Set working directory
+setwd("C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/")
 
-# Create another shapefile
-test_data <- bgd_test
+# Import SPEI data for 2010-2020 covering all of Bangladesh on a regular 0.5 degrees grid
+spei_geo <- read.csv("Code/SPEI_2010_20_BGD.csv")
 
-# Turn data frame into a raster for spatial disaggregation 
+# Load shapefile with administrative level 4 for Bangladesh
+bgd_admin4 <- read_sf("Data/Administrative boundary shapefiles/bgd_adm_bbs_20201113_shp/bgd_adm_bbs_20201113_SHP/bgd_admbnda_adm4_bbs_20201113.shp")
+
+# Load BIHS location data
+BIHS_admin <- read_dta("Data/BIHS data/BIHSlocations.dta")
+
+# Remove unnecessary columns
+spei_geo <- spei_geo[,2:14]
+
+# Turn data frame with SPEI values into a raster - this creates a "brick" where values of SPEI for all years are on top of one another
 raster_spei <- rasterFromXYZ(spei_geo)
 
 # Make sure the CRS is consistent with shapefile
-proj4string(raster_spei) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+crs(raster_spei) <- "+proj=longlat +datum=WGS84 +no_defs"
 
-# Disaggregate - this will create a "higher resolution" grid, even though the values of the points falling within the larger grid cell will be the same, this wil allow for the spatial join with a shapefile so that each union has its distinct SPEI data point. You can play around with the factor of disaggregation.
-raster_spei_disag <-  disaggregate(raster_spei, fact=200)
+# Calculate the mean value of SPEI in each union (administrative level 4) - keep identifiers for admin level 4
+bgd_spei <- exact_extract(raster_spei, bgd_admin4, fun = c('mean'), append_cols=c("ADM4_PCODE", "ADM4_EN"))
 
-# Turn back into a data frame - now we have more data points
-spei_df <- as.data.frame(raster_spei_disag, xy=TRUE)
-
-# Remove NA values
-spei_df <- na.omit(spei_df)
-
-# Turn into a spatial data frame for a spatial join with the shapefile 
-spei_df$x <- as.numeric(spei_df$x)
-spei_df$y <- as.numeric(spei_df$y)
-coordinates(spei_df) <- ~x+y
-
-# Set CRS as the same - taken from shapefile
-proj4string(spei_df) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
-
-# Perform a spatial join with the Bangladesh shapefile
-ID <- over(test_data, spei_df)                               
-test_data@data <- cbind(test_data@data , ID )  
-
-# Turn back into a data frame  
-test_data <- as.data.frame(test_data)
-
-# Check if there are any NA values - currently 6
-summary(test_data)
+# Check that there are no missing values -3 NA values (coastal areas which the grid did not cover )
+summary(bgd_spei)
 
 ```
 
 Now match the union-level SPEI information with BIHS locations of households 
 
 ```{r BIHS locations SPEI }
-# Make new data frame for this 
-bgd_spei <- test_data
-
-# Create a new data frame with compatible codes
-# Remove unnecessary columns
-
-bgd_spei <- bgd_spei[ , !names(bgd_spei) %in% 
-    c("ADM4_REF","ADM4ALT1EN", "ADM4ALT2EN")]
-
 # Rename the code identifiers for administrative levels - remove BD
 bgd_spei$ADM4_PCODE <- substr(bgd_spei$ADM4_PCODE, 3, 10)
 
@@ -138,9 +120,8 @@ bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="857656"] <- "857650"
 # Left join - just to see how many observations overlap.
 BIHS_drought <- left_join(BIHS_admin, bgd_spei_newcodes)
 
-# Remove ugly columns
-BIHS_drought <- BIHS_drought[ , !names(BIHS_drought) %in% 
-    c("date","validTo", "validOn")]
+# Remove "mean" from column names
+names(BIHS_drought) <- sub("^mean.", "", names(BIHS_drought))
 
 # Export BIHS data matched with flood data a csv file where the "ADM4_PCODE" column corresponds to the "uncode" column from the BIHS data. 
 write.csv(BIHS_drought, "BIHS_drought.csv")
