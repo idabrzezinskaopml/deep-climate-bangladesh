@@ -38,42 +38,10 @@ raster_spei <- rasterFromXYZ(spei_geo)
 # Make sure the CRS is consistent with shapefile
 crs(raster_spei) <- "+proj=longlat +datum=WGS84 +no_defs"
 
-# Calculate the mean value of SPEI in each union (administrative level 4) - keep identifiers for admin level 4
-bgd_spei <- exact_extract(raster_spei, bgd_admin4, fun = c('mean'), append_cols=c("ADM4_PCODE", "ADM4_EN"))
-
-# Check that there are no missing values -3 NA values (coastal areas which the grid did not cover )
-summary(bgd_spei)
-
 ```
 
-Now match the union-level SPEI information with BIHS locations of households 
 
-```{r BIHS locations SPEI }
-# Rename the code identifiers for administrative levels - remove BD
-bgd_spei$ADM4_PCODE <- substr(bgd_spei$ADM4_PCODE, 3, 10)
-
-# Remove the first 2 digits from the union code (those refer to admin level 1)
-bgd_spei$ADM4_PCODE <- substr(bgd_spei$ADM4_PCODE, 3, 10)
-
-# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
-
-# Change to numeric - this will drop 0 at the front 
-bgd_spei$ADM4_PCODE <- as.numeric(bgd_spei$ADM4_PCODE)
-
-# Back to character 
-bgd_spei$ADM4_PCODE <- as.character(bgd_spei$ADM4_PCODE)
-
-# Rename columns in BIHS_admin before the join 
-names(BIHS_admin)[names(BIHS_admin) == "uncode"] <- "ADM4_PCODE"
-
-# Back to character for compatibility of the merge
-bgd_spei$ADM4_PCODE <- as.character(bgd_spei$ADM4_PCODE)
-BIHS_admin$ADM4_PCODE <- as.character(BIHS_admin$ADM4_PCODE)
-
-
-```
-
-## Inspect the union codes that did not match manually, then join dataframes ##
+## Create a shapefile with corrected union codes that match BIHS ##
 
 For all 14 cases, look at the Stata dta file with BIHS locations that also has labels with names in English. On that basis, find the corresponding ADM4_PCODE in the shapefile, which is different.
 
@@ -93,31 +61,75 @@ For all 14 cases, look at the Stata dta file with BIHS locations that also has l
 14. BIHS code: 857650, BIHS name:  Madankhali, Shapefile ADM4_PCODE: 857656
 
 
-```{r union codes}
-	
-# Look up the union code associated with an English name of the union in the Bangladesh shapefile
-with(bgd_spei, ADM4_PCODE[ADM4_EN =="Madankhali"])
+```{r BIHS locations SPEI }
+# Rename the code identifiers for administrative levels - remove BD
+bgd_admin4$ADM4_PCODE <- substr(bgd_admin4$ADM4_PCODE, 3, 10)
+
+# Remove the first 2 digits from the union code (those refer to admin level 1)
+bgd_admin4$ADM4_PCODE <- substr(bgd_admin4$ADM4_PCODE, 3, 10)
+
+# This is correct for most cases. However, whenever "0" is the first digit, we should delete it 
+
+# Change to numeric - this will drop 0 at the front 
+bgd_admin4$ADM4_PCODE <- as.numeric(bgd_admin4$ADM4_PCODE)
+
+# Back to character 
+bgd_admin4$ADM4_PCODE <- as.character(bgd_admin4$ADM4_PCODE)
+
+# Rename columns in BIHS_admin before the join 
+names(BIHS_admin)[names(BIHS_admin) == "uncode"] <- "ADM4_PCODE"
+
+# Back to character for compatibility of the merge
+BIHS_admin$ADM4_PCODE <- as.character(BIHS_admin$ADM4_PCODE)
 
 # Create another data frame with values from the Bangladesh shapefile to replace with new matching codes. Here I replace shapefile codes with codes from BIHS.
-bgd_spei_newcodes <- bgd_spei
+bgd_admin4 <- bgd_admin4 %>% 
+  mutate(uncode = case_when(
+    ADM4_PCODE == "199417" ~ "193617",      # 1
+    ADM4_PCODE == "198110" ~ "198104",      # 2
+    ADM4_PCODE == "338621" ~ "338609",      # 3
+    ADM4_PCODE == "354311" ~ "354306",      # 4
+    ADM4_PCODE == "824795" ~ "827395",      # 5
+    ADM4_PCODE == "932580" ~ "935780",      # 6
+    ADM4_PCODE == "108556" ~ "102056",      # 7
+    ADM4_PCODE == "105413" ~ "105409",      # 8
+    ADM4_PCODE == "386115" ~ "386109",      # 9
+    ADM4_PCODE == "696320" ~ "696312",      # 10
+    ADM4_PCODE == "496111" ~ "496106",      # 11
+    ADM4_PCODE == "855826" ~ "855816",      # 12
+    ADM4_PCODE == "857317" ~ "857309",      # 13
+    ADM4_PCODE == "857656" ~ "857650"))     # 14
 
-# Now replace admin 4 codes
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="199417"] <- "193617"  #1
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="198110"] <- "198104"  #2
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="338621"] <- "338609"  #3
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="354311"] <- "354306"  #4
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="824795"] <- "827395"  #5 
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="932580"] <- "935780"  #6
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="108556"] <- "102056"  #7
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="105413"] <- "105409"  #8
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="386115"] <- "386109"  #9
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="696320"] <- "696312"  #10
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="496111"] <- "496106"  #11
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="855826"] <- "855816"  #12
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="857317"] <- "857309"  #13
-bgd_spei_newcodes$ADM4_PCODE[bgd_spei_newcodes$ADM4_PCODE=="857656"] <- "857650"  #14
+# Transfer all other non-missing codes 
+bgd_admin4$uncode[is.na(bgd_admin4$uncode)] <- bgd_admin4$ADM4_PCODE
 
-# Left join - just to see how many observations overlap.
+# Drop the original column and rename the new one 
+bgd_admin4<- bgd_admin4[ , !names(bgd_admin4) %in% 
+    c("ADM4_PCODE")]
+names(bgd_admin4)[names(bgd_admin4) == 'uncode'] <- "ADM4_PCODE"
+
+# Move admin 4 code to the front 
+bgd_admin4 <- bgd_admin4 %>% 
+  relocate("ADM4_PCODE")
+
+# Save shapefile - this will create a shapefile consistent with BIHS codes for future reference 
+st_write(bgd_admin4, "C:/Users/idabr/OneDrive - Oxford Policy Management Limited/DEEP Conflict Climate Bangladesh/Data/Harmonised shapefile admin 4bgd_admin4_bihs_harmonised.shp")
+```
+
+# Calculate the mean value of SPEI for each union 4 #
+
+```{r}
+# Calculate the mean value of SPEI in each union (administrative level 4) - keep identifiers for admin level 4
+bgd_spei <- exact_extract(raster_spei, bgd_admin4, fun = c('mean'), append_cols=c("ADM4_PCODE", "ADM4_EN"))
+
+# Check that there are no missing values -3 NA values (coastal areas which the grid did not cover)
+summary(bgd_spei)
+```
+
+Match with BIHS data based on corrected codes
+
+```{r union codes}
+# Left join - all codes should match 
 BIHS_drought <- left_join(BIHS_admin, bgd_spei_newcodes)
 
 # Remove "mean" from column names
